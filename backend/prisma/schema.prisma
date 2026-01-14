@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String         @id @default(uuid())
+  phone         String         @unique
+  name          String?
+  type          UserType       @default(REGULAR)
+  isBlocked     Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  appointments  Appointment[]
+  conversations Conversation[]
+  waitlist      Waitlist[]
+
+  @@map("users")
+}
+
+model Conversation {
+  id        String            @id @default(uuid())
+  userId    String
+  state     ConversationState @default(INIT)
+  context   Json?
+  startedAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  endedAt   DateTime?
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  Message[]
+
+  @@index([userId])
+  @@index([state])
+  @@map("conversations")
+}
+
+model Message {
+  id             String           @id @default(uuid())
+  conversationId String
+  direction      MessageDirection
+  content        String
+  mediaType      String?
+  mediaUrl       String?
+  intent         String?
+  confidence     Float?
+  processed      Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+  conversation   Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([createdAt])
+  @@map("messages")
+}
+
+model Appointment {
+  id          String            @id @default(uuid())
+  userId      String
+  service     String
+  description String?
+  dateTime    DateTime
+  duration    Int               @default(60)
+  status      AppointmentStatus @default(PENDING)
+  notes       String?
+  createdAt   DateTime          @default(now())
+  confirmedAt DateTime?
+  cancelledAt DateTime?
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([dateTime])
+  @@index([status])
+  @@map("appointments")
+}
+
+model Intent {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  keywords    String[]
+  response    String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("intents")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  action    String
+  entity    String
+  entityId  String?
+  data      Json?
+  userId    String?
+  createdAt DateTime @default(now())
+
+  @@index([action])
+  @@index([entity])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("system_configs")
+}
+
+enum UserType {
+  REGULAR
+  VIP
+  BLOCKED
+}
+
+enum ConversationState {
+  INIT
+  AUTO_ATTENDANCE
+  FAQ_FLOW
+  SCHEDULING_FLOW
+  CONFIRMATION_PENDING
+  HUMAN_HANDOFF
+  PAUSED
+  BLOCKED
+  COMPLETED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+// Lista de Espera para horários indisponíveis
+model Waitlist {
+  id            String   @id @default(uuid())
+  userId        String
+  service       String
+  preferredDate DateTime
+  status        WaitlistStatus @default(WAITING)
+  createdAt     DateTime @default(now())
+  notifiedAt    DateTime?
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([preferredDate])
+  @@map("waitlist")
+}
+
+enum WaitlistStatus {
+  WAITING
+  NOTIFIED
+  CONVERTED
+  EXPIRED
+}
+
+// Slots bloqueados pelo admin (almoço, feriados, pausas)
+model BlockedSlot {
+  id        String   @id @default(uuid())
+  date      DateTime // Data do bloqueio
+  startTime String   // Hora início (ex: "12:00")
+  endTime   String   // Hora fim (ex: "14:00")
+  reason    String?  // Motivo (Almoço, Feriado, etc)
+  createdAt DateTime @default(now())
+
+  @@index([date])
+  @@map("blocked_slots")
+}
