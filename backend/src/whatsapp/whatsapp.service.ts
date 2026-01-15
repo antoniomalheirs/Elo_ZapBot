@@ -23,6 +23,7 @@ export interface IncomingMessage {
     messageId: string;
     hasMedia: boolean;
     type: string;
+    isFromMe: boolean;  // FEATURE: Agent First Rule
 }
 
 @Injectable()
@@ -39,6 +40,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     // FEATURE: Debounce de mensagens - espera 2s antes de processar
     private pendingMessages: Map<string, { msg: proto.IWebMessageInfo; timeout: NodeJS.Timeout }> = new Map();
     private readonly DEBOUNCE_DELAY = 2000; // 2 segundos
+
+    // FEATURE: Watchdog (Cão de Guarda) 🐕
+    private watchdogInterval: NodeJS.Timeout | null = null;
+    private lastConnectionUpdate: Date = new Date();
 
     constructor(
         private readonly prisma: PrismaService,
@@ -62,9 +67,28 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         } catch (error) {
             this.logger.error(`❌ Erro ao fechar sessão: ${error}`);
         }
+        this.stopWatchdog();
     }
 
+    private isInitializing = false;
+
     private async initialize() {
+        // PREVENÇÃO DE CORRIDA: Se já estiver inicializando, não faz nada
+        if (this.isInitializing) {
+            this.logger.warn('⚠️ Tentativa de inicialização duplicada ignorada (Já em andamento).');
+            return;
+        }
+
+        // CLEANUP: Garantir que não existam sockets órfãos (Isso causava erro 440 de conflito)
+        if (this.sock) {
+            this.logger.log('♻️ Fechando socket anterior antes de reinicializar...');
+            try { this.sock.end(undefined); } catch (e) { }
+            this.sock = undefined as any;
+        }
+
+        this.isInitializing = true;
+        this.lastConnectionUpdate = new Date(); // FIX: Resetar timer para evitar Watchdog prematuro durante boot
+
         try {
             this.logger.log('🚀 Inicializando cliente WhatsApp (Baileys)...');
 
@@ -82,6 +106,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
                 printQRInTerminal: false, // Vamos gerar nosso próprio QR
                 logger: pino({ level: 'silent' }), // Silenciar logs do Baileys
                 browser: ['ZapBot', 'Chrome', '122.0.0'], // Identificação do browser
+                connectTimeoutMs: 60000,
+                defaultQueryTimeoutMs: 60000,
             });
 
             // Handler de atualização de conexão
@@ -97,10 +123,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
                 // Conexão estabelecida
                 if (connection === 'open') {
-                    this.isReady = true;
                     this.currentQrCode = null;
+                    this.isReady = true;
                     this.logger.log('✅ WhatsApp conectado com sucesso!');
+                    // this.startWatchdog(); // FIX: Reativar Watchdog após conexão estável
                 }
+                this.lastConnectionUpdate = new Date();
 
                 // Conexão fechada
                 if (connection === 'close') {
@@ -135,10 +163,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
                 if (m.type !== 'notify') return;
 
                 for (const msg of m.messages) {
-                    // Ignorar mensagens do próprio bot
-                    if (!msg.key || msg.key.fromMe) continue;
-
                     const remoteJid = msg.key.remoteJid || '';
+
+                    // FEATURE: Agent First - Não ignorar 'fromMe' se for chat com usuário
+                    // Mas ignorar se for broadcast ou status
+                    if (remoteJid === 'status@broadcast' || remoteJid.includes('@g.us')) continue;
 
                     // Cancelar timeout anterior do mesmo usuário (debounce)
                     const pending = this.pendingMessages.get(remoteJid);
@@ -161,22 +190,58 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
             this.logger.error(`❌ Erro ao inicializar WhatsApp: ${error}`);
             this.logger.warn('⚠️ Tentando novamente em 5 segundos...');
             setTimeout(() => this.initialize(), 5000);
+        } finally {
+            // Liberar flag apenas se NÃO for um reload agendado por erro (para evitar duplo finally)
+            // Mas aqui o setTimeout é assíncrono, então podemos liberar.
+            this.isInitializing = false;
         }
     }
 
     private async handleIncomingMessage(msg: proto.IWebMessageInfo) {
         try {
-            // Ignorar mensagens do próprio bot
-            if (!msg.key || msg.key.fromMe) return;
+            // Check essential data
+            if (!msg.key) return;
 
-            // Ignorar mensagens de status/broadcast
-            if (msg.key.remoteJid === 'status@broadcast') return;
-
-            // Ignorar grupos (opcional - pode remover se quiser suportar grupos)
-            if (msg.key.remoteJid?.includes('@g.us')) return;
-
+            const isFromMe = msg.key.fromMe || false;
             const remoteJid = msg.key.remoteJid || '';
-            const phoneNumber = remoteJid.replace('@s.whatsapp.net', '');
+
+            // Filters
+            if (remoteJid === 'status@broadcast') return;
+            if (remoteJid?.includes('@g.us')) return;
+
+            // FIX CRÍTICO: Extrair número de telefone REAL, não LID
+            // Baileys fornece campos "Alt" com o número real quando o principal é LID
+            let phoneNumber: string;
+
+            // 1. Tentar pegar do remoteJidAlt (campo com número real para chats individuais)
+            // @ts-ignore - Campo existe mas tipo pode não estar definido
+            const remoteJidAlt = msg.key.remoteJidAlt;
+            // @ts-ignore
+            const participantAlt = msg.key.participantAlt;
+
+            if (remoteJidAlt && remoteJidAlt.includes('@s.whatsapp.net')) {
+                // Melhor caso: temos o número real no campo Alt
+                phoneNumber = remoteJidAlt.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                this.logger.log(`📱 Número real extraído de remoteJidAlt: ${phoneNumber}`);
+            } else if (participantAlt && participantAlt.includes('@s.whatsapp.net')) {
+                // Segundo melhor: participantAlt tem o número
+                phoneNumber = participantAlt.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                this.logger.log(`📱 Número real extraído de participantAlt: ${phoneNumber}`);
+            } else if (remoteJid.includes('@lid')) {
+                // LID format sem Alt disponível
+                this.logger.warn(`⚠️ Recebido LID sem Alt disponível: ${remoteJid}`);
+                const participant = msg.key.participant;
+                if (participant && participant.includes('@s.whatsapp.net')) {
+                    phoneNumber = participant.replace('@s.whatsapp.net', '');
+                } else {
+                    // Fallback: remover @lid e logar para debug
+                    phoneNumber = remoteJid.replace('@lid', '');
+                    this.logger.warn(`⚠️ Usando LID como fallback: ${phoneNumber} (LOG PARA DEBUG)`);
+                }
+            } else {
+                // Formato normal @s.whatsapp.net
+                phoneNumber = remoteJid.replace('@s.whatsapp.net', '').replace('@c.us', '');
+            }
 
             // Extrair texto da mensagem
             let body = '';
@@ -238,6 +303,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
                 messageId: msg.key?.id || '',
                 hasMedia: !!(messageContent?.audioMessage || messageContent?.imageMessage || messageContent?.videoMessage || messageContent?.documentMessage),
                 type: Object.keys(messageContent || {})[0] || 'text',
+                isFromMe: isFromMe
             };
 
             this.logger.log(`📨 [DEBUG] Mensagem recebida de ${phoneNumber}: ${body}`);
@@ -300,13 +366,57 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
             // Parar de digitar
             await this.sock.sendPresenceUpdate('paused', chatId);
 
-            // Enviar a mensagem
+            // Parar de digitar
+            await this.sock.sendPresenceUpdate('available', chatId);
+
             await this.sock.sendMessage(chatId, { text: message });
-            this.logger.log(`📤 Mensagem enviada para ${chatId}`);
             return true;
         } catch (error) {
             this.logger.error(`❌ Erro ao enviar mensagem: ${error}`);
             return false;
+        }
+    }
+
+    // --- WATCHDOG SYSTEM ---
+    private startWatchdog() {
+        if (this.watchdogInterval) clearInterval(this.watchdogInterval);
+
+        this.logger.log('🐕 Watchdog iniciado: monitorando conexão...');
+
+        this.watchdogInterval = setInterval(async () => {
+            const now = new Date();
+            const diff = now.getTime() - this.lastConnectionUpdate.getTime(); // Em ms
+
+            // 1. Verificar se socket existe
+            if (!this.sock) {
+                this.logger.warn('🐕 Watchdog: Socket perdido (null). Reiniciando...');
+                await this.initialize();
+                return;
+            }
+
+            // 2. Verificar estado do WebSocket (se disponível)
+            // @ts-ignore - Acesso interno ao WS
+            const wsState = this.sock.ws?.readyState;
+            const isOpen = wsState === 1; // 1 = OPEN
+
+            if (isOpen) {
+                // Se está aberto, atualizamos o timestamp para não expirar
+                this.lastConnectionUpdate = new Date();
+                return;
+            }
+
+            // 3. Se não está aberto e passou muito tempo (> 5 min) sem update, reinicia
+            if (diff > 5 * 60 * 1000) {
+                this.logger.error(`🐕 Watchdog: Conexão travada (Diff: ${diff}ms, State: ${wsState}). Reiniciando...`);
+                await this.initialize();
+            }
+        }, 60000); // Checar a cada minuto
+    }
+
+    private stopWatchdog() {
+        if (this.watchdogInterval) {
+            clearInterval(this.watchdogInterval);
+            this.watchdogInterval = null;
         }
     }
 

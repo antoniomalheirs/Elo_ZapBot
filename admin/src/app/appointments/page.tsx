@@ -1,6 +1,7 @@
-import { Calendar, CheckCircle, Clock, XCircle } from 'lucide-react';
+"use client";
 
-export const dynamic = 'force-dynamic';
+import { Calendar, CheckCircle, Clock, XCircle, Plus, X, Loader2 } from 'lucide-react';
+import { useState, useEffect } from 'react';
 
 type Appointment = {
     id: string;
@@ -13,19 +14,90 @@ type Appointment = {
     };
 };
 
-async function getAppointments() {
-    try {
-        const res = await fetch('http://localhost:3000/appointments', { cache: 'no-store' });
-        if (!res.ok) throw new Error('Falha ao buscar agendamentos');
-        return res.json() as Promise<Appointment[]>;
-    } catch (error) {
-        console.error(error);
-        return [];
-    }
-}
+type Service = {
+    name: string;
+    price: number;
+};
 
-export default async function AppointmentsPage() {
-    const appointments = await getAppointments();
+export default function AppointmentsPage() {
+    const [appointments, setAppointments] = useState<Appointment[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [showModal, setShowModal] = useState(false);
+    const [services, setServices] = useState<Service[]>([]);
+    const [formLoading, setFormLoading] = useState(false);
+    const [formData, setFormData] = useState({
+        clientName: '',
+        clientPhone: '',
+        service: '',
+        date: '',
+        time: '',
+        notes: ''
+    });
+
+    // Fetch appointments
+    const fetchAppointments = async () => {
+        try {
+            const res = await fetch('http://localhost:3000/appointments', { cache: 'no-store' });
+            if (res.ok) {
+                const data = await res.json();
+                setAppointments(data);
+            }
+        } catch (error) {
+            console.error(error);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Fetch services from settings
+    const fetchServices = async () => {
+        try {
+            const res = await fetch('http://localhost:3000/settings', { cache: 'no-store' });
+            if (res.ok) {
+                const data = await res.json();
+                setServices(data.services || [
+                    { name: 'Terapia Individual', price: 150 },
+                    { name: 'Avaliação Psicológica', price: 800 }
+                ]);
+            }
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
+    useEffect(() => {
+        fetchAppointments();
+        fetchServices();
+    }, []);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setFormLoading(true);
+
+        try {
+            const res = await fetch('http://localhost:3000/appointments/create-manual', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData)
+            });
+
+            const result = await res.json();
+
+            if (result.success) {
+                alert('✅ Agendamento criado com sucesso!');
+                setShowModal(false);
+                setFormData({ clientName: '', clientPhone: '', service: '', date: '', time: '', notes: '' });
+                fetchAppointments(); // Refresh list
+            } else {
+                alert('❌ Erro: ' + result.error);
+            }
+        } catch (error) {
+            alert('❌ Erro ao criar agendamento');
+            console.error(error);
+        } finally {
+            setFormLoading(false);
+        }
+    };
 
     return (
         <div className="p-8">
@@ -34,7 +106,11 @@ export default async function AppointmentsPage() {
                     <h1 className="text-3xl font-bold text-slate-100">Agendamentos</h1>
                     <p className="text-slate-400 mt-1">Gerencie consultas e horários.</p>
                 </div>
-                <button className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition-colors">
+                <button
+                    onClick={() => setShowModal(true)}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
+                >
+                    <Plus className="w-4 h-4" />
                     Novo Agendamento
                 </button>
             </header>
@@ -51,7 +127,13 @@ export default async function AppointmentsPage() {
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800">
-                        {appointments.length === 0 ? (
+                        {loading ? (
+                            <tr>
+                                <td colSpan={5} className="p-8 text-center text-slate-500">
+                                    <Loader2 className="w-6 h-6 animate-spin mx-auto" />
+                                </td>
+                            </tr>
+                        ) : appointments.length === 0 ? (
                             <tr>
                                 <td colSpan={5} className="p-8 text-center text-slate-500">
                                     Nenhum agendamento encontrado.
@@ -86,6 +168,112 @@ export default async function AppointmentsPage() {
                     </tbody>
                 </table>
             </div>
+
+            {/* Modal de Novo Agendamento */}
+            {showModal && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold text-slate-100">Novo Agendamento</h2>
+                            <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-200">
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-sm text-slate-400 mb-1">Nome do Cliente</label>
+                                <input
+                                    type="text"
+                                    value={formData.clientName}
+                                    onChange={(e) => setFormData(prev => ({ ...prev, clientName: e.target.value }))}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"
+                                    placeholder="João Silva"
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-slate-400 mb-1">Telefone *</label>
+                                <input
+                                    type="tel"
+                                    value={formData.clientPhone}
+                                    onChange={(e) => setFormData(prev => ({ ...prev, clientPhone: e.target.value }))}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"
+                                    placeholder="27999999999"
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-slate-400 mb-1">Serviço *</label>
+                                <select
+                                    value={formData.service}
+                                    onChange={(e) => setFormData(prev => ({ ...prev, service: e.target.value }))}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"
+                                    required
+                                >
+                                    <option value="">Selecione...</option>
+                                    {services.map((s) => (
+                                        <option key={s.name} value={s.name}>{s.name} - R${s.price}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm text-slate-400 mb-1">Data *</label>
+                                    <input
+                                        type="date"
+                                        value={formData.date}
+                                        onChange={(e) => setFormData(prev => ({ ...prev, date: e.target.value }))}
+                                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"
+                                        required
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm text-slate-400 mb-1">Horário *</label>
+                                    <input
+                                        type="time"
+                                        value={formData.time}
+                                        onChange={(e) => setFormData(prev => ({ ...prev, time: e.target.value }))}
+                                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"
+                                        required
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-slate-400 mb-1">Observações</label>
+                                <textarea
+                                    value={formData.notes}
+                                    onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                                    rows={2}
+                                    placeholder="Observações adicionais..."
+                                />
+                            </div>
+
+                            <button
+                                type="submit"
+                                disabled={formLoading}
+                                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white font-medium py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
+                            >
+                                {formLoading ? (
+                                    <>
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                        Criando...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Calendar className="w-4 h-4" />
+                                        Criar Agendamento
+                                    </>
+                                )}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

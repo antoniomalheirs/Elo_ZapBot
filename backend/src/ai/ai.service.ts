@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConversationState } from '@prisma/client';
 import { SettingsService } from '../config/settings.service';
+import { KeywordDetectorService } from './keyword-detector.service';
 
 export interface AIProcessInput {
     message: string;
@@ -26,7 +27,8 @@ export class AIService {
 
     constructor(
         private readonly config: ConfigService,
-        private readonly settingsService: SettingsService
+        private readonly settingsService: SettingsService,
+        private readonly keywordDetector: KeywordDetectorService
     ) {
         this.ollamaUrl = this.config.get<string>('OLLAMA_URL') || 'http://localhost:11434';
     }
@@ -38,6 +40,21 @@ export class AIService {
     async analyzeMessage(message: string, conversationContext?: any): Promise<{ intent: string; entities: any; confidence: number }> {
         if (!message) return { intent: 'UNKNOWN', entities: {}, confidence: 0 };
 
+        // === FASE 1: Detecção Rápida por Keywords (sem IA) ===
+        const keywordResult = this.keywordDetector.detectIntent(message);
+        if (keywordResult && keywordResult.confidence >= 75) {
+            // Extrair entidades também
+            const entities = this.keywordDetector.extractEntities(message);
+            this.logger.log(`⚡ Keyword Detection: ${keywordResult.intent} (${keywordResult.confidence}%) - Pulando IA`);
+            return {
+                intent: keywordResult.intent,
+                entities,
+                confidence: keywordResult.confidence
+            };
+        }
+
+        // === FASE 2: Se keywords não tiveram confiança, usar IA ===
+        this.logger.log('🤖 Keywords inconclusivo, chamando IA...');
         // Get current date info (MELHORIA 1: Consciência Temporal)
         const now = new Date();
         const dayNames = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
@@ -62,70 +79,68 @@ CONTEXTO DA CONVERSA (O que foi dito antes):
         const servicesList = services.map((s: any) => `- "${s.name}" (Valores sob consulta)`).join('\n');
 
         const prompt = `
-Você é um analisador de intenções para uma CLÍNICA DE PSICOLOGIA.
-Sua ÚNICA tarefa é identificar a INTENÇÃO do paciente e extrair dados relevantes.
+Você é um CLASSIFICADOR DE INTENÇÕES para uma CLÍNICA DE PSICOLOGIA no Brasil.
+ANALISE a mensagem e retorne APENAS um JSON com a intenção detectada.
 
-=== DATA E HORA ATUAL ===
-Hoje é: ${currentDay}, ${currentDate}
-Horário: ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+=== CONTEXTO TEMPORAL ===
+Hoje: ${currentDay}, ${currentDate}
+Hora: ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
 ${historyBlock}
+
 === SERVIÇOS DA CLÍNICA ===
 ${servicesList}
 
-=== INTENÇÕES POSSÍVEIS (escolha a mais adequada) ===
-- GREETING: Saudação inicial (oi, olá, bom dia, boa tarde, boa noite)
-- HELP: Pede ajuda, menu, opções, "o que você faz?"
-- SCHEDULE_NEW: Quer agendar, marcar consulta, ver horários disponíveis
-- CANCEL: Quer cancelar agendamento existente
-- RESCHEDULE: Quer remarcar, mudar data/horário
-- VIEW_APPOINTMENTS: Quer ver suas consultas agendadas, "minhas consultas"
-- FAQ_HOURS: Pergunta sobre horários de funcionamento da clínica
-- FAQ_PRICE: Pergunta sobre valores, preços, quanto custa
-- FAQ_SERVICES: Pergunta sobre serviços oferecidos, "o que vocês fazem?"
-- FAQ_LOCATION: Pergunta sobre endereço, localização, como chegar, mapa
-- FAQ_INSURANCE: Pergunta sobre convênio, plano de saúde
-- HUMAN_REQUEST: Quer falar com humano, atendente, pessoa real
-- EMERGENCY: Situação de urgência, crise, emergência
-- THANKS: Agradecimento (obrigado, valeu, agradeço)
-- CONFIRMATION: Confirmação (sim, ok, pode ser, confirmo)
-- DENIAL: Negação (não, nào quero, cancelar)
-- UNKNOWN: Não conseguiu identificar claramente
+=== INTENÇÕES POSSÍVEIS ===
+GREETING       → Saudação (oi, olá, bom dia, boa tarde, eae, fala)
+HELP           → Quer menu, ajuda, opções, não sabe o que fazer
+SCHEDULE_NEW   → Quer agendar/marcar consulta ou sessão
+RESCHEDULE     → Quer remarcar, mudar dia/hora de consulta existente
+VIEW_APPOINTMENTS → Quer ver/consultar suas consultas agendadas
+FAQ_HOURS      → Pergunta sobre horário de funcionamento
+FAQ_PRICE      → Pergunta sobre valores, preços, custos
+FAQ_SERVICES   → Pergunta sobre serviços, o que a clínica faz
+FAQ_LOCATION   → Pergunta sobre endereço, como chegar
+FAQ_INSURANCE  → Pergunta sobre convênio, plano de saúde
+HUMAN_REQUEST  → Quer falar com humano/atendente
+EMERGENCY      → Crise, urgência, precisa ajuda imediata
+THANKS         → Obrigado, valeu, agradeço
+CONFIRMATION   → Sim, ok, pode ser, confirmo, beleza
+DENIAL         → Não, não quero, deixa pra lá
+UNKNOWN        → Não conseguiu identificar
 
-=== REGRAS PARA DATAS ===
-- "amanhã" = dia seguinte ao atual
-- "hoje" = data atual
-- "segunda", "terça", etc = próximo dia da semana correspondente
-- SEMPRE converta para o formato "Segunda-feira", "Terça-feira", etc.
+=== REGRAS ESPECIAIS ===
+1. Erros de digitação comuns: "oi" = "oi" | "oiee" = "oi" | "obg" = "obrigado"
+2. Gírias brasileiras: "blz" = "beleza" | "vlw" = "valeu" | "tmj" = "obrigado"
+3. Abreviações: "qdo" = "quando" | "td" = "tudo" | "vc" = "você"
+4. Se a pessoa menciona "amanhã", "segunda", "15h" = provavelmente SCHEDULE_NEW
+5. Se já está no fluxo de agendamento e responde só com data/hora = SCHEDULE_NEW
+6. "Remarcar" OU "reagendar" = sempre RESCHEDULE (nunca SCHEDULE_NEW)
+7. "Minhas consultas" OU "meus agendamentos" = VIEW_APPOINTMENTS
 
-=== FORMATO DE RESPOSTA (APENAS JSON) ===
-Responda SOMENTE com um JSON válido, sem explicações:
-{
-  "intent": "CODIGO_DA_INTENCAO",
-  "confidence": 85,
-  "entities": {
-    "service": "Nome do Serviço (se mencionado)",
-    "day": "Dia da semana (Segunda-feira, Terça-feira, etc)",
-    "time": "Horário (ex: 15h, 10:00)"
-  }
-}
+=== ENTIDADES A EXTRAIR ===
+- service: Nome do serviço mencionado (Terapia, Avaliação, etc)
+- day: Dia mencionado (Segunda-feira, amanhã, hoje, 20/01)
+- time: Horário mencionado (15h, 10:00, de manhã, à tarde)
 
-=== REGRAS DE CONFIANÇA ===
-- confidence: número de 0 a 100 indicando sua certeza
-- 90-100: Mensagem muito clara e direta
-- 70-89: Razoavelmente claro, mas pode ter ambiguidade
-- 50-69: Ambíguo, múltiplas interpretações possíveis
-- 0-49: Muito confuso, não entendeu bem
+=== EXEMPLOS DE CLASSIFICAÇÃO ===
+"oi gostaria de marcar uma consulta" → {"intent":"SCHEDULE_NEW","confidence":95,"entities":{}}
+"quero remarcar minha consulta" → {"intent":"RESCHEDULE","confidence":95,"entities":{}}
+"quanto custa a terapia" → {"intent":"FAQ_PRICE","confidence":90,"entities":{"service":"Terapia"}}
+"segunda às 14h" → {"intent":"SCHEDULE_NEW","confidence":85,"entities":{"day":"Segunda-feira","time":"14h"}}
+"ok pode ser" → {"intent":"CONFIRMATION","confidence":85,"entities":{}}
+"nao" → {"intent":"DENIAL","confidence":90,"entities":{}}
+"vc eh um robo?" → {"intent":"HUMAN_REQUEST","confidence":70,"entities":{}}
+"minhas consultas" → {"intent":"VIEW_APPOINTMENTS","confidence":95,"entities":{}}
+"preciso de ajuda urgente" → {"intent":"EMERGENCY","confidence":95,"entities":{}}
+"to muito ansiosa" → {"intent":"EMERGENCY","confidence":75,"entities":{}}
+"hmm sei la" → {"intent":"UNKNOWN","confidence":30,"entities":{}}
 
-=== EXEMPLOS ===
-"Quero terapia sexta às 15h" -> {"intent": "SCHEDULE_NEW", "confidence": 95, "entities": {"service": "Terapia", "day": "Sexta-feira", "time": "15h"}}
-"Qual o valor?" -> {"intent": "FAQ_PRICE", "confidence": 90, "entities": {}}
-"hmm talvez" -> {"intent": "UNKNOWN", "confidence": 30, "entities": {}}
-"ok" -> {"intent": "CONFIRMATION", "confidence": 75, "entities": {}}
-
-=== MENSAGEM ATUAL DO PACIENTE ===
+=== MENSAGEM DO PACIENTE ===
 "${message}"
 
-JSON:`;
+=== RESPONDA APENAS COM JSON VÁLIDO ===
+{"intent":"","confidence":0,"entities":{}}
+`;
 
         try {
             const response = await this.callOllama(prompt);
@@ -173,10 +188,9 @@ JSON:`;
 
     /**
      * Monta o prompt para a IA (Clínica de Psicologia)
+     * VERSÃO MELHORADA: Mais natural e contextual
      */
     private buildPrompt(input: AIProcessInput, settings: any): string {
-        const therapyPrice = settings.priceTherapy || '150';
-        const evalPrice = settings.priceEvaluation || '800';
         const openTime = settings.openTime || '09:00';
         const closeTime = settings.closeTime || '18:00';
         const address = settings.clinicAddress || 'Endereço não configurado';
@@ -184,36 +198,76 @@ JSON:`;
         const clinicName = settings.clinicName || 'Nossa Clínica';
         const mapsLink = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address + ' ' + city)}`;
 
-        return `Você é a secretária virtual da clínica "${clinicName}".
-Seja simpática, profissional e sempre útil.
+        // Serviços formatados (SEM PREÇOS - preços são conversados com humano)
+        const servicesList = (settings.services || [])
+            .map((s: any) => `• ${s.name}`)
+            .join('\n') || '• Terapia Individual\n• Avaliação Psicológica';
 
-=== INFORMAÇÕES VIVAS DA CLÍNICA ===
-- Horário: Segunda a Sexta | ${openTime} às ${closeTime}
-- Endereço: ${address} ${city ? `(${city})` : ''}
-- Link Mapa: ${mapsLink}
-- Serviços e Valores ATUAIS:
-  1. Terapia Individual/Infantil: Valores sob consulta.
-  2. Avaliação Psicológica: Valores sob consulta.
-- Pagamento: PIX ou Dinheiro.
+        // Personalidade customizável
+        const defaultPersona = `Você é Ana, a secretária virtual da ${clinicName}. 
+Você é simpática, acolhedora e profissional. Fala de forma natural, como uma brasileira conversa no WhatsApp.
+Use emojis com moderação (1-2 por mensagem). Seja BREVE (máximo 2-3 frases por resposta).`;
 
-=== CONTEXTO ATUAL ===
-- Nome do paciente: ${input.userName}
-- Estado da conversa: ${input.currentState}
+        const persona = settings.aiPersona || defaultPersona;
+        const instructions = settings.aiInstructions || '';
 
-=== MENSAGEM DO PACIENTE ===
+        // Detectar nome do paciente para personalizar
+        const patientName = input.userName ? `, ${input.userName.split(' ')[0]}` : '';
+
+        return `${persona}
+
+=== INFORMAÇÕES DA CLÍNICA ===
+🏥 Nome: ${clinicName}
+🕐 Horário: Segunda a Sexta, ${openTime} às ${closeTime}
+📍 Endereço: ${address}${city ? ` - ${city}` : ''}
+
+💼 Serviços Disponíveis:
+${servicesList}
+
+=== CONTEXTO DA CONVERSA ===
+👤 Nome do paciente: ${input.userName || 'Não informado'}
+📊 Estado atual: ${input.currentState}
+
+=== MENSAGEM RECEBIDA ===
 "${input.message}"
 
-=== INSTRUÇÕES ===
-Responda de forma acolhedora, profissional e BREVE (máximo 3 frases).
-Se identificar a intenção, coloque no início: [INTENT:tipo]
+=== INSTRUÇÕES IMPORTANTES ===
+${instructions}
 
-Intenções possíveis:
-- SCHEDULING (quer agendar/remarcar/cancelar)
-- FAQ (pergunta sobre a clínica)
-- GREETING (saudação)
-- THANKS (agradecimento)
-- OFF_TOPIC (assunto fora do escopo)
-- URGENT (crise ou emergência psicológica)
+1. NUNCA MENCIONE PREÇOS OU VALORES - Sobre valores, diga "Para informações sobre valores, digite *Falar com atendente*" ou "Posso te direcionar para nosso atendente que pode informar os valores!"
+2. SEMPRE GUIE PARA AÇÕES DO BOT: Induza o cliente a responder palavras que ativam fluxos:
+   - Para agendar: Pergunte "Quer *agendar* uma consulta?"
+   - Para ver consultas: "Que tal ver suas *consultas*?"
+   - Para remarcar: "Posso te ajudar a *remarcar*?"
+   - Para falar com humano: "Digite *atendente* que conecto você!"
+3. SEJA BREVE: Máximo 2-3 frases.
+4. SEJA NATURAL: Fale como pessoa real, não robô.
+5. USE EMOJIS: Com moderação (1-2 por mensagem).
+
+=== EXEMPLOS DE RESPOSTAS BOAS ===
+Pergunta: "oi"
+Resposta: "Olá${patientName}! 👋 Posso te ajudar a *agendar* uma consulta ou tirar dúvidas?"
+
+Pergunta: "quanto custa"
+Resposta: "Para informações sobre valores, digite *atendente* que conecto você com nossa equipe! �"
+
+Pergunta: "qual o valor"
+Resposta: "Posso te direcionar para quem cuida dos valores! Digite *atendente* ou quer *agendar* primeiro? 😊"
+
+Pergunta: "onde fica"
+Resposta: "Ficamos na ${address}${city ? `, ${city}` : ''} 📍 Quer *agendar* uma visita?"
+
+Pergunta: "quero agendar"
+Resposta: "Ótimo${patientName}! 📅 Digite *agendar* para começar!"
+
+Pergunta: "obrigado"
+Resposta: "Por nada${patientName}! 😊 Se precisar de algo mais, é só chamar!"
+
+=== O QUE NUNCA FAZER ===
+❌ Mencionar preços ou valores específicos
+❌ Textos longos (mais de 4 linhas)
+❌ Terminar sem sugerir uma ação
+❌ Formalidade excessiva
 
 Resposta:`;
     }

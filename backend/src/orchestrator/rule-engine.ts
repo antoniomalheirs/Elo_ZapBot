@@ -151,11 +151,15 @@ export class RuleEngine {
             {
                 id: 'reschedule_appointment',
                 name: 'Remarcar Consulta',
-                priority: 57,
-                keywords: ['remarcar', 'reagendar', 'mudar horário', 'trocar dia', 'adiar', 'antecipar', 'remarcação'],
-                intent: 'RESCHEDULE_APPOINTMENT',
-                event: 'RESCHEDULE_FLOW',
-                response: 'Para remarcar, o ideal é cancelar o agendamento antigo e fazer um novo. Ou digite "Falar com atendente" para ajuda.',
+                priority: 65, // MAIOR que Agendar (60) para capturar "reagendar" primeiro
+                keywords: ['remarcar', 'reagendar', 'quero remarcar', 'quero reagendar', 'mudar horário', 'trocar dia', 'adiar', 'antecipar', 'remarcação', 'mudar data', 'trocar horário'],
+                patterns: [
+                    /(quero|preciso|vou|gostaria)\s+(de\s+)?(remarcar|reagendar)/i,
+                    /(remarcar|reagendar)\s+(a\s+|minha\s+)?(consulta|sessão|sessao)?/i,
+                ],
+                intent: 'RESCHEDULE', // Usar o mesmo intent que o handler espera
+                event: 'RESCHEDULE_REQUEST',
+                response: undefined, // Tratado dinamicamente pelo Orchestrator
                 isActive: true,
             },
             {
@@ -164,8 +168,18 @@ export class RuleEngine {
                 priority: 56,
                 keywords: ['minhas consultas', 'meus agendamentos', 'ver consultas', 'consultas agendadas', 'tenho consulta', 'quando é minha consulta'],
                 intent: 'VIEW_APPOINTMENTS',
-                event: 'VIEW_APPOINTMENTS_FLOW',
-                response: 'Você pode ver seus agendamentos acessando o link enviado na confirmação ou perguntando para um atendente.',
+                event: 'VIEW_APPOINTMENTS',
+                response: undefined, // Tratado dinamicamente pelo Orchestrator para mostrar consultas reais
+                isActive: true,
+            },
+            {
+                id: 'info_consultas',
+                name: 'Info Consultas',
+                priority: 50,
+                keywords: ['info consultas', 'informações sobre consultas', 'como ver consultas', 'como remarcar', 'ajuda agendamento', 'comandos'],
+                intent: 'INFO_CONSULTAS',
+                event: 'INFO_REQUESTED',
+                response: `ℹ️ *Gerenciamento de Consultas*\n\nVocê pode usar os seguintes comandos:\n\n📅 *Ver Consultas*: Lista seus agendamentos futuros.\n🔄 *Remarcar*: Altera a data de um agendamento.\n\nDigite um dos comandos acima!`,
                 isActive: true,
             },
 
@@ -177,7 +191,7 @@ export class RuleEngine {
                 keywords: ['ajuda', 'ajudar', 'orienta', 'socorro', 'duvida', 'dúvida', 'opções', 'menu'],
                 intent: 'HELP',
                 event: 'MENU_REQUESTED',
-                response: `🏥 *${clinicName}*\n\nBem-vindo(a)!\n\nMenu:\n📅 *Agendar Consulta*\n📍 *Endereço/Mapa*\n🕐 *Horários*\n📋 *Listar Serviços*\n👤 *Falar com Atendente* (Valores/Informações)\n\nDigite uma das opções!`,
+                response: `🏥 *${clinicName}*\n\nBem-vindo(a)!\n\nMenu:\n📅 *Agendar Consulta*\n📋 *Listar Serviços*\nℹ️ *Info Consultas*\n🕐 *Horários*\n📍 *Endereço/Mapa*\n👤 *Falar com Atendente* (Valores/Informações)\n\nDigite uma das opções!`,
                 isActive: true,
             },
             {
@@ -261,16 +275,6 @@ export class RuleEngine {
                 keywords: ['meus agendamentos', 'minhas consultas', 'o que tenho marcado', 'ver agendamentos', 'listar minhas consultas'],
                 intent: 'MY_APPOINTMENTS',
                 event: 'VIEW_APPOINTMENTS',
-                response: undefined, // Tratado dinamicamente pelo Orchestrator
-                isActive: true,
-            },
-            {
-                id: 'cancel_appointment',
-                name: 'Cancelar Agendamento',
-                priority: 50,
-                keywords: ['cancelar consulta', 'desmarcar', 'não vou poder ir', 'cancelar agendamento', 'quero cancelar'],
-                intent: 'CANCEL_APPOINTMENT',
-                event: 'CANCEL_REQUEST',
                 response: undefined, // Tratado dinamicamente pelo Orchestrator
                 isActive: true,
             },

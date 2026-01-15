@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Sidebar } from "@/components/Sidebar";
+import { MainLayout } from "@/components/MainLayout";
 import "./globals.css";
 import { Inter } from "next/font/google";
 
@@ -17,11 +17,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="pt-BR">
-      <body className={`${inter.className} bg-slate-950 text-slate-50 flex`}>
-        <Sidebar />
-        <main className="flex-1 ml-64 min-h-screen">
+      <body className={`${inter.className} bg-slate-950 text-slate-50`}>
+        <MainLayout>
           {children}
-        </main>
+        </MainLayout>
       </body>
     </html>
   );

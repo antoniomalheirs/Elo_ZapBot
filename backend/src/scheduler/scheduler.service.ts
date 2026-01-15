@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../database/prisma.service';
 import { WhatsAppService } from '../whatsapp/whatsapp.service';
 import { ContextService } from '../context/context.service';
+import { SettingsService } from '../config/settings.service';
 
 @Injectable()
 export class SchedulerService {
@@ -11,7 +12,8 @@ export class SchedulerService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly whatsapp: WhatsAppService,
-        private readonly context: ContextService
+        private readonly context: ContextService,
+        private readonly settingsService: SettingsService
     ) { }
 
     /**
@@ -83,69 +85,38 @@ export class SchedulerService {
         }
     }
 
+    // FEATURE: Reminder (Day Before) removed as per user request.
+
     /**
-     * Envia lembretes de consulta (24h antes)
-     * Roda todos os dias às 9h da manhã
+     * Confirmação no Dia - Envia mensagem na hora configurada (padrão 07:30)
+     * Roda a cada minuto para checar compatibilidade com horário configurado
      */
-    @Cron('0 9 * * *') // 09:00 todos os dias
-    async sendAppointmentReminders() {
-        this.logger.log('📅 Enviando lembretes de consulta para amanhã...');
-
+    /**
+     * Confirmação no Dia - Envia mensagem na hora configurada (padrão 07:30)
+     * Roda a cada minuto para checar compatibilidade com horário configurado
+     */
+    @Cron(CronExpression.EVERY_MINUTE)
+    async checkAndSendReminders() {
         try {
-            // Calcular janela de "amanhã" (próximas 24-48h)
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            tomorrow.setHours(0, 0, 0, 0);
+            // 1. Obter configuração dinâmica
+            const settings = await this.settingsService.getAllSettings();
+            let reminderTime = settings.reminderTime || '07:30'; // Formato HH:mm
 
-            const dayAfterTomorrow = new Date(tomorrow);
-            dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 1);
-
-            // Buscar agendamentos para amanhã
-            const appointments = await this.prisma.appointment.findMany({
-                where: {
-                    dateTime: {
-                        gte: tomorrow,
-                        lt: dayAfterTomorrow
-                    },
-                    status: 'CONFIRMED'
-                },
-                include: { user: true }
-            });
-
-            this.logger.log(`📋 Encontrados ${appointments.length} agendamentos para amanhã.`);
-
-            for (const apt of appointments) {
-                const timeStr = apt.dateTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-                const reminderMsg = `📅 *Lembrete de Consulta*\n\nOlá${apt.user.name ? `, ${apt.user.name}` : ''}! 👋\n\nLembrando que amanhã você tem:\n\n• *${apt.service}* às *${timeStr}*\n\nConfirma sua presença? (Sim/Não)`;
-
-                // Fix: Ensure correct WhatsApp ID format
-                const cleanPhone = apt.user.phone.replace(/\D/g, '');
-                // FIX: Baileys usa @s.whatsapp.net ao invés de @c.us
-                const chatId = cleanPhone + '@s.whatsapp.net';
-
-                const sent = await this.whatsapp.sendMessage(chatId, reminderMsg);
-
-                if (sent) {
-                    this.logger.log(`✅ Lembrete enviado para ${apt.user.name} (${chatId})`);
-                } else {
-                    this.logger.warn(`⚠️ Falha ao enviar lembrete para ${apt.user.name}`);
-                }
+            // FIX: Normalizar para garantir zero à esquerda (8:20 -> 08:20)
+            if (typeof reminderTime === 'string') {
+                reminderTime = reminderTime.padStart(5, '0');
             }
 
-        } catch (error) {
-            this.logger.error(`❌ Erro no Cron de Lembretes: ${error}`);
-        }
-    }
+            // 2. Verificar se é a hora certa
+            const now = new Date();
+            const currentTime = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-    /**
-     * Confirmação no Dia - Envia mensagem na MANHÃ do próprio dia da consulta
-     * Roda todos os dias às 7:30 da manhã
-     */
-    @Cron('30 7 * * *') // 07:30 todos os dias
-    async sendSameDayConfirmation() {
-        this.logger.log('☀️ Enviando confirmações do dia para consultas de hoje...');
+            if (currentTime !== reminderTime) {
+                return;
+            }
 
-        try {
+            this.logger.log(`✅ Hora do Lembrete (${currentTime}): Iniciando envio...`);
+
             // Janela de HOJE
             const today = new Date();
             today.setHours(0, 0, 0, 0);
@@ -153,40 +124,74 @@ export class SchedulerService {
             const tomorrow = new Date(today);
             tomorrow.setDate(tomorrow.getDate() + 1);
 
-            // Buscar agendamentos para HOJE
+            // Buscar agendamentos para HOJE que AINDA NÃO receberam lembrete
             const appointments = await this.prisma.appointment.findMany({
                 where: {
                     dateTime: {
                         gte: today,
                         lt: tomorrow
                     },
-                    status: 'CONFIRMED'
+                    status: 'CONFIRMED',
+                    dayOfReminderSent: false // FIX: Evitar spam duplicado
                 },
                 include: { user: true }
             });
 
-            this.logger.log(`☀️ ${appointments.length} consulta(s) para hoje`);
+            if (appointments.length === 0) {
+                this.logger.log('✅ Nenhum lembrete pendente para hoje neste horário.');
+                return;
+            }
+
+            this.logger.log(`☀️ ${appointments.length} consulta(s) para hoje. Enviando confirmações...`);
+
+            const address = settings.clinicAddress || '';
 
             for (const apt of appointments) {
-                const timeStr = apt.dateTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-                const confirmMsg = `☀️ *Bom dia${apt.user.name ? `, ${apt.user.name}` : ''}!*\n\n📅 Hoje você tem *${apt.service}* às *${timeStr}*.\n\nConfirma sua presença? (Sim/Não)`;
+                // FEATURE: Verificar Handoff (Ignorar se já estiver falando com humano)
+                const conversation = await this.prisma.conversation.findFirst({
+                    where: { userId: apt.userId },
+                    orderBy: { updatedAt: 'desc' }
+                });
 
-                // Fix: Ensure correct WhatsApp ID format
-                const cleanPhone = apt.user.phone.replace(/\D/g, '');
-                // FIX: Baileys usa @s.whatsapp.net ao invés de @c.us
-                const chatId = cleanPhone + '@s.whatsapp.net';
+                if (conversation?.state === 'HUMAN_HANDOFF') {
+                    this.logger.log(`🔇 Lembrete para ${apt.user.phone} ignorado (Em atendimento humano).`);
+                    continue;
+                }
 
-                const sent = await this.whatsapp.sendMessage(chatId, confirmMsg);
+                try {
+                    const timeStr = apt.dateTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                    const dateStr = apt.dateTime.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit' });
 
-                if (sent) {
-                    this.logger.log(`✅ Confirmação do dia enviada para ${apt.user.name} (${chatId})`);
-                } else {
-                    this.logger.warn(`⚠️ Falha ao enviar confirmação do dia para ${apt.user.name}`);
+                    const city = settings.clinicCity || '';
+                    const addressFull = address ? `\n📍 ${address}${city ? ` - ${city}` : ''}` : '';
+
+                    const confirmMsg = `⏰ *Lembrete de Consulta!*\n\nOlá ${apt.user.name || 'paciente'}! 👋\n\nSua consulta é *HOJE*:\n\n📅 ${dateStr}\n🕐 ${timeStr}\n\n🏥 *Clínica Elo*${addressFull}\n\nObrigada, Ana Paula Malheiros! 😊`;
+
+                    const cleanPhone = apt.user.phone.replace(/\D/g, '');
+                    const chatId = cleanPhone + '@s.whatsapp.net';
+
+                    const sent = await this.whatsapp.sendMessage(chatId, confirmMsg);
+
+                    if (sent) {
+                        try {
+                            await this.prisma.appointment.update({
+                                where: { id: apt.id },
+                                data: { dayOfReminderSent: true }
+                            });
+                            this.logger.log(`✅ Confirmação do dia enviada e salva para ${apt.user.name}`);
+                        } catch (e) {
+                            this.logger.warn(`⚠️ Erro ao salvar status de envio: ${e}`);
+                        }
+                    } else {
+                        this.logger.warn(`⚠️ Falha ao enviar confirmação do dia para ${apt.user.name}`);
+                    }
+                } catch (err) {
+                    this.logger.error(`❌ Erro processando agendamento ${apt.id}: ${err}`);
                 }
             }
 
         } catch (error) {
-            this.logger.error(`❌ Erro no Cron de Confirmação do Dia: ${error}`);
+            this.logger.error(`❌ Erro no Cron de Lembretes: ${error}`);
         }
     }
 
@@ -267,7 +272,7 @@ export class SchedulerService {
 
     /**
      * Limpa conversas abandonadas no meio do fluxo de agendamento
-     * Reset após 30 minutos de inatividade
+     * Reset após 1 HORA de inatividade (antes era 30 min, mas conflitava com proatividade)
      * Roda a cada 15 minutos
      */
     @Cron('*/15 * * * *') // A cada 15 minutos
@@ -275,13 +280,13 @@ export class SchedulerService {
         this.logger.log('🧹 Limpando conversas abandonadas...');
 
         try {
-            const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+            const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000); // 1 hora
 
             // Buscar conversas em SCHEDULING_FLOW ou CONFIRMATION_PENDING sem atividade
             const staleConversations = await this.prisma.conversation.findMany({
                 where: {
                     state: { in: ['SCHEDULING_FLOW', 'CONFIRMATION_PENDING'] },
-                    updatedAt: { lt: thirtyMinutesAgo }
+                    updatedAt: { lt: oneHourAgo }
                 }
             });
 

@@ -1,9 +1,15 @@
 import { Controller, Get, Post, Delete, Query, Body, Param } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { SchedulerService } from '../scheduler/scheduler.service';
+import { SettingsService } from '../config/settings.service';
 
 @Controller('appointments')
 export class AppointmentsController {
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly schedulerService: SchedulerService,
+        private readonly settingsService: SettingsService
+    ) { }
 
     @Get('debug')
     async debug() {
@@ -249,5 +255,148 @@ export class AppointmentsController {
     @Delete('blocked-slots/:id')
     async deleteBlockedSlot(@Param('id') id: string) {
         return this.prisma.blockedSlot.delete({ where: { id } });
+    }
+
+    // ENDPOINT - Status dos Lembretes (Pendentes e Enviados)
+    @Get('reminders-status')
+    async getRemindersStatus() {
+        const now = new Date();
+
+        // Início de HOJE (para mostrar consultas de hoje que ainda não receberam lembrete)
+        const todayStart = new Date(now);
+        todayStart.setHours(0, 0, 0, 0);
+
+        // Lembretes PENDENTES (TODAS consultas futuras que ainda não receberam lembrete)
+        const pending = await this.prisma.appointment.findMany({
+            where: {
+                dateTime: { gte: todayStart }, // Hoje ou futuro
+                status: 'CONFIRMED',
+                reminderSent: false
+            },
+            include: { user: true },
+            orderBy: { dateTime: 'asc' }
+        });
+
+        // Lembretes JÁ ENVIADOS (últimos 7 dias)
+        const sevenDaysAgo = new Date(now);
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const sent = await this.prisma.appointment.findMany({
+            where: {
+                reminderSent: true,
+                dateTime: { gte: sevenDaysAgo }
+            },
+            include: { user: true },
+            orderBy: { dateTime: 'desc' },
+            take: 50
+        });
+
+        // Buscar horário real das configurações
+        const settings = await this.settingsService.getAllSettings();
+        const reminderTime = settings.reminderTime || '08:00';
+
+        return {
+            pending: pending.map(apt => ({
+                id: apt.id,
+                clientName: apt.user.name || 'Sem nome',
+                clientPhone: apt.user.phone,
+                service: apt.service,
+                dateTime: apt.dateTime,
+                reminderSent: apt.reminderSent
+            })),
+            sent: sent.map(apt => ({
+                id: apt.id,
+                clientName: apt.user.name || 'Sem nome',
+                clientPhone: apt.user.phone,
+                service: apt.service,
+                dateTime: apt.dateTime,
+                reminderSent: apt.reminderSent
+            })),
+            config: {
+                reminderTime,
+                nextRun: `Próximo envio: ${reminderTime}`
+            }
+        };
+    }
+
+    // ENDPOINT DE TESTE - Disparar lembretes manualmente
+    @Get('test-reminders')
+    async testReminders() {
+        await this.schedulerService.checkAndSendReminders();
+        return { success: true, message: 'Ciclo de lembretes acionado! Verifique os logs para saber se a hora bateu.' };
+    }
+
+    // ENDPOINT - Criar agendamento manualmente (Admin Panel)
+    @Post('create-manual')
+    async createManual(@Body() body: {
+        clientName: string;
+        clientPhone: string;
+        service: string;
+        date: string;
+        time: string;
+        notes?: string;
+    }) {
+        // Validar campos obrigatórios
+        if (!body.clientPhone || !body.service || !body.date || !body.time) {
+            return { success: false, error: 'Campos obrigatórios: clientPhone, service, date, time' };
+        }
+
+        // Sanitizar telefone
+        const cleanPhone = body.clientPhone.replace(/\D/g, '');
+
+        // Buscar ou criar usuário
+        let user = await this.prisma.user.findFirst({
+            where: { phone: cleanPhone }
+        });
+
+        if (!user) {
+            user = await this.prisma.user.create({
+                data: {
+                    phone: cleanPhone,
+                    name: body.clientName || 'Cliente Manual'
+                }
+            });
+        } else if (body.clientName && body.clientName !== user.name) {
+            // Atualizar nome se fornecido e diferente
+            user = await this.prisma.user.update({
+                where: { id: user.id },
+                data: { name: body.clientName }
+            });
+        }
+
+        // Criar data/hora do agendamento
+        const [year, month, day] = body.date.split('-').map(Number);
+        const [hour, minute] = body.time.split(':').map(Number);
+        const dateTime = new Date(year, month - 1, day, hour, minute);
+
+        // Verificar se já existe agendamento nesse horário
+        const existing = await this.prisma.appointment.findFirst({
+            where: {
+                dateTime,
+                status: { not: 'CANCELLED' }
+            }
+        });
+
+        if (existing) {
+            return { success: false, error: 'Já existe um agendamento neste horário!' };
+        }
+
+        // Criar agendamento
+        const appointment = await this.prisma.appointment.create({
+            data: {
+                userId: user.id,
+                service: body.service,
+                dateTime,
+                status: 'CONFIRMED',
+                notes: body.notes || 'Agendado manualmente pelo admin'
+            },
+            include: { user: true }
+        });
+
+        return {
+            success: true,
+            message: 'Agendamento criado com sucesso!',
+            appointment
+        };
     }
 }

@@ -32,6 +32,8 @@ export interface ConversationContext {
     failedAttempts?: number;
     // FEATURE 9: Proatividade (Flag para evitar spam)
     proactiveNudgeSent?: boolean;
+    // FEATURE: Remarcar - ID da consulta antiga (só cancela depois de confirmar nova)
+    rescheduleFromAppointmentId?: string;
     // Dados genéricos
     schedulingData?: {
         service?: string;

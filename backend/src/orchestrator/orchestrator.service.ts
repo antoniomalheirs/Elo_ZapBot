@@ -48,10 +48,53 @@ export class OrchestratorService implements OnModuleInit {
     async handleMessage(msg: IncomingMessage): Promise<string | null> {
         this.logger.log(`🔄 Processando mensagem de ${msg.from}: ${msg.body}`);
 
+        // FEATURE: Agent First Rule (Se o atendente mandar mensagem, o bot pausa)
+        if (msg.isFromMe) {
+            this.logger.log(`👤 Agente enviou mensagem para ${msg.from}: "${msg.body}"`);
+            try {
+                const user = await this.getOrCreateUser(msg.from, msg.contactName);
+                const conversation = await this.getOrCreateConversation(user.id);
+
+                // Salvar mensagem no histórico
+                await this.saveMessage(conversation.id, 'OUTBOUND', msg.body);
+
+                const msgLower = msg.body.toLowerCase().trim();
+
+                // FEATURE: Detectar comando de encerramento do atendente
+                const exitCommands = ['encerrar', 'finalizar', 'voltar bot', 'ativar bot', '/encerrar', '/finalizar'];
+                const isExitCommand = exitCommands.some(cmd => msgLower.includes(cmd));
+
+                if (isExitCommand && conversation.state === 'HUMAN_HANDOFF') {
+                    // ENCERRAR ATENDIMENTO - REATIVAR BOT
+                    this.logger.log(`✅ Atendente encerrou atendimento para ${msg.from}. Reativando bot.`);
+                    await this.updateConversationState(conversation.id, 'AUTO_ATTENDANCE');
+
+                    // Notificar cliente
+                    const clientChatId = msg.from.includes('@') ? msg.from : `${msg.from}@s.whatsapp.net`;
+                    const closeMsg = `✅ Seu atendimento foi finalizado!\n\nEstou de volta para ajudá-lo(a). Digite *Menu* se precisar de algo mais! 😊`;
+                    await this.whatsapp.sendMessage(clientChatId, closeMsg);
+
+                    return null;
+                }
+
+                // Se não é comando de encerramento, apenas pausar o bot
+                if (conversation.state !== 'COMPLETED' && conversation.state !== 'BLOCKED' && conversation.state !== 'HUMAN_HANDOFF') {
+                    await this.updateConversationState(conversation.id, 'HUMAN_HANDOFF');
+                    this.logger.log(`⏸️ Conversa com ${msg.from} colocada em PAUSA (Agent First).`);
+                }
+
+            } catch (e) {
+                this.logger.error(`Erro ao processar mensagem do agente: ${e}`);
+            }
+            return null; // Não responder
+        }
+
         try {
             const user = await this.getOrCreateUser(msg.from, msg.contactName);
             const conversation = await this.getOrCreateConversation(user.id);
             await this.saveMessage(conversation.id, 'INBOUND', msg.body);
+            this.logger.log(`🔍 State: ${conversation.state} | Msg: ${msg.body}`);
+
 
             const context = await this.context.getContext(user.id, conversation.id);
 
@@ -138,41 +181,59 @@ export class OrchestratorService implements OnModuleInit {
             let intent: string | undefined;
             let ruleResult: any;
 
-            // FEATURE: Detectar resposta a Lembrete de Consulta
+            // FEATURE: Detectar resposta a Lembrete de Consulta (Interactive Flow)
+            // Se estado for CONFIRMATION_PENDING, assumimos que é confirmação de agendamento OU lembrete
+            // Para diferenciar, podemos checar o histórico, mas 'CONFIRMATION_PENDING' é um bom bloqueio
+            if (conversation.state === 'CONFIRMATION_PENDING') {
+                const lower = msg.body.toLowerCase().trim();
+
+                // 1. CONFIRMAR
+                if (['sim', 'confirmo', 'ok', 'pode', 'vou'].some(k => lower.includes(k))) {
+                    this.logger.log(`✅ Lembrete/Agendamento confirmado por ${msg.from}`);
+                    response = '✅ Ótimo! Sua presença está confirmada. Te aguardamos! 😊';
+                    newState = 'AUTO_ATTENDANCE';
+
+                    // Tenta confirmar no banco se houver agendamento pendente/confirmado para amanhã
+                    // O ideal seria passar o contexto, mas por simplificação vamos assumir o fluxo
+                    // Se for fluxo de agendamento novo, o handleConfirmation já tratou.
+                    // Se for lembrete, não precisa mudar status (já é CONFIRMED), mas logamos.
+                }
+                // 2. CANCELAR - AQUI É A CRÍTICA
+                else if (['não', 'nao', 'cancelar', 'cancela', 'desmarcar'].some(k => lower.includes(k))) {
+                    this.logger.log(`❌ Lembrete/Agendamento sendo CANCELADO por ${msg.from}`);
+                    const cancelMsg = await this.handleReminderCancellation(user.id);
+                    if (cancelMsg) {
+                        response = cancelMsg;
+                        newState = 'AUTO_ATTENDANCE';
+                    } else {
+                        response = 'Não encontrei agendamento para cancelar. Digite *Menu*.';
+                        newState = 'AUTO_ATTENDANCE';
+                    }
+                }
+                // 3. Resposta Inválida
+                else {
+                    response = '⚠️ Não entendi. Responda apenas *SIM* para confirmar ou *CANCELAR* para liberar o horário.';
+                    // Mantém o estado CONFIRMATION_PENDING
+                    newState = 'CONFIRMATION_PENDING';
+                }
+
+                if (response) {
+                    const sent = await this.whatsapp.sendMessage(msg.from, response);
+                    await this.saveMessage(conversation.id, 'OUTBOUND', response, 'REMINDER_REPLY');
+                    await this.updateConversationState(conversation.id, newState);
+                    return null; // Stop processing
+                }
+            }
+
+            // Fallback para lógica antiga de 'lastOutbound' (pode ser removido depois se quiser limpar)
             const lastOutbound = await this.prisma.message.findFirst({
                 where: { conversationId: conversation.id, direction: 'OUTBOUND' },
                 orderBy: { createdAt: 'desc' }
             });
 
-            if (lastOutbound?.content.includes('Lembrete de Consulta') || lastOutbound?.content.includes('Confirma sua presença')) {
-                const lower = msg.body.toLowerCase().trim();
-
-                if (lower === 'não' || lower === 'nao' || lower.includes('não vou') || lower.includes('nao vou')) {
-                    // Cancelar agendamento de amanhã
-                    const cancelResult = await this.handleReminderCancellation(user.id);
-                    response = cancelResult;
-                    newState = 'AUTO_ATTENDANCE';
-
-                    // Finalizar processamento
-                    if (response) {
-                        const humanized = this.humanize.humanize(response, msg.body, { addConnector: false, checkEmpathy: true });
-                        const sent = await this.whatsapp.sendMessage(msg.from, humanized);
-                        if (!sent) this.logger.warn(`⚠️ Falha ao enviar resposta de cancelamento para ${msg.from}`);
-                        await this.saveMessage(conversation.id, 'OUTBOUND', humanized, 'REMINDER_CANCEL');
-                        await this.updateConversationState(conversation.id, newState);
-                        return null;
-                    }
-                } else if (lower === 'sim' || lower === 'ok' || lower.includes('confirmo')) {
-                    response = '✅ Ótimo! Sua presença está confirmada. Te aguardamos amanhã! 😊';
-                    newState = 'AUTO_ATTENDANCE';
-
-                    const humanized = this.humanize.humanize(response, msg.body, { addConnector: false, checkEmpathy: true });
-                    const sent = await this.whatsapp.sendMessage(msg.from, humanized);
-                    if (!sent) this.logger.warn(`⚠️ Falha ao enviar resposta de confirmação para ${msg.from}`);
-                    await this.saveMessage(conversation.id, 'OUTBOUND', humanized, 'REMINDER_CONFIRM');
-                    await this.updateConversationState(conversation.id, newState);
-                    return null;
-                }
+            if (lastOutbound?.content.includes('Lembrete de Consulta') && conversation.state !== 'CONFIRMATION_PENDING') {
+                // Se o estado não foi setado (legado), tentamos capturar
+                // ... Lógica similar ...
             }
 
             // 1. Processar regras / intenções PRIMEIRO para detectar interrupções 
@@ -201,6 +262,7 @@ export class OrchestratorService implements OnModuleInit {
 
             // Logica de Fluxo (State Machine)
             else if (conversation.state === 'SCHEDULING_FLOW') {
+                this.logger.log('🔄 Entering handleSchedulingFlow...');
                 // Passamos o intent detectado para o flow saber se deve interromper
                 const result = await this.handleSchedulingFlow(msg.body, context, user.id, conversation.id, settings, intent);
                 response = result.response;
@@ -251,45 +313,12 @@ export class OrchestratorService implements OnModuleInit {
 
                         // FEATURE: Notificar admin quando cliente pede humano
                         // FEATURE: Notificar admin quando cliente pede humano
-                        let adminPhone = settings.adminPhone;
-                        this.logger.log(`🔍 Verificando adminPhone original: ${adminPhone}`);
-
-                        if (adminPhone) {
-                            // 1. Sanitizar: Remover tudo que não for número
-                            let cleanPhone = adminPhone.replace(/\D/g, '');
-
-                            // 2. Validação básica (Brasil tem min 10, max 13 dígitos)
-                            if (cleanPhone.length >= 10) {
-                                // FIX: Baileys usa @s.whatsapp.net ao invés de @c.us
-                                const targetId = `${cleanPhone}@s.whatsapp.net`;
-                                this.logger.log(`📤 Tentando notificar admin no target: ${targetId}`);
-
-                                const clientName = user.name || 'Cliente';
-                                // FIX: Baileys usa @s.whatsapp.net
-                                const clientPhone = msg.from.replace('@s.whatsapp.net', '').replace('@c.us', '');
-                                const adminNotification = `🔔 *Novo Atendimento Humano*\n\nCliente: ${clientName}\nTelefone: ${clientPhone}\nMensagem: "${msg.body}"\n\n📲 Entre em contato com o cliente.`;
-
-                                // Enviar notificação
-                                const sent = await this.whatsapp.sendMessage(targetId, adminNotification);
-                                if (sent) {
-                                    this.logger.log(`✅ Notificação enviada para admin (${targetId})`);
-                                } else {
-                                    this.logger.warn(`⚠️ Falha ao notificar admin (${targetId})`);
-                                }
-                            } else {
-                                this.logger.warn(`⚠️ adminPhone inválido após sanitização: ${cleanPhone}`);
-                            }
-                        } else {
-                            this.logger.warn('⚠️ adminPhone não configurado nas settings');
-                        }
+                        // FEATURE: Notificar admin quando cliente pede humano
+                        await this.notifyAdminHandoff(user, msg, settings);
                     }
-                    // FEATURE: Meus Agendamentos
-                    else if (intent === 'MY_APPOINTMENTS') {
+                    // FEATURE: Meus Agendamentos (suporta MY_APPOINTMENTS e VIEW_APPOINTMENTS)
+                    else if (intent === 'MY_APPOINTMENTS' || intent === 'VIEW_APPOINTMENTS') {
                         response = await this.handleMyAppointments(user.id);
-                    }
-                    // FEATURE: Cancelar Agendamento
-                    else if (intent === 'CANCEL_APPOINTMENT') {
-                        response = await this.handleCancelRequest(user.id, msg.body);
                     }
                     // FEATURE: Remarcar
                     else if (intent === 'RESCHEDULE') {
@@ -301,83 +330,105 @@ export class OrchestratorService implements OnModuleInit {
                     }
                 }
                 else {
-                    // 2. Se não for regra, tenta Small Talk (Papo furado)
-                    const smallTalkResponse = this.humanize.handleSmallTalk(msg.body);
-                    if (smallTalkResponse) {
-                        response = smallTalkResponse;
-                        intent = 'SMALL_TALK';
-                    }
-                    else {
-                        // 3. Último recurso: Análise de IA (complexo)
-                        // MELHORIA: Passando contexto da conversa para a IA (memória de curto prazo)
-                        const analysis = await this.ai.analyzeMessage(msg.body, context);
-                        const aiIntent = analysis.intent;
-                        const entities = analysis.entities;
-                        const confidence = analysis.confidence || 0;
+                    // 2. Se não for regra, vai direto para IA
+                    // (Small Talk removido - Fallback Inteligente cuida de tudo)
 
-                        // FEATURE 1 + 6: Nível de confiança - se baixo, pedir esclarecimento ou escalar
-                        if (confidence < 60) {
-                            const attempts = (context.failedAttempts || 0) + 1;
-                            await this.context.updateContext(user.id, conversation.id, { failedAttempts: attempts });
+                    // Análise de IA (complexo)
+                    // MELHORIA: Passando contexto da conversa para a IA (memória de curto prazo)
+                    const analysis = await this.ai.analyzeMessage(msg.body, context);
+                    const aiIntent = analysis.intent;
+                    const entities = analysis.entities;
+                    const confidence = analysis.confidence || 0;
 
-                            // FEATURE 6: Após 3 tentativas falhas, escalar para humano
-                            if (attempts >= 3) {
-                                this.logger.warn(`🚨 3 tentativas falhas - escalando para humano`);
-                                response = `${user.name ? user.name + ', ' : ''}parece que não estou conseguindo te ajudar bem. 😔\n\nVou pedir para um atendente humano entrar em contato com você!\n\n👤 Aguarde alguns minutos, por favor.`;
-                                intent = 'HUMAN_ESCALATION';
-                                newState = 'HUMAN_HANDOFF';
-                            } else {
-                                this.logger.warn(`⚠️ Confiança baixa (${confidence}%) - tentativa ${attempts}/3`);
-                                response = this.generateClarificationQuestion(msg.body, user.name);
-                                intent = 'LOW_CONFIDENCE';
-                            }
-                        }
-                        else if (aiIntent && aiIntent !== 'UNKNOWN') {
-                            this.logger.log(`🤖 IA recuperou: ${aiIntent} (${confidence}% confiança)`);
-                            intent = aiIntent;
+                    // FEATURE 1 + 6: Nível de confiança - se baixo, pedir esclarecimento ou escalar
+                    if (confidence < 60) {
+                        const attempts = (context.failedAttempts || 0) + 1;
+                        await this.context.updateContext(user.id, conversation.id, { failedAttempts: attempts });
 
-                            ruleResult.matched = true;
-                            ruleResult.intent = aiIntent;
-                            // PASSANDO SETTINGS E NOME DO USUARIO (Feature 5)
-                            ruleResult.response = this.ruleEngine.getResponseByIntent(aiIntent, settings, user.name);
-                            ruleResult.event = this.ruleEngine.getEventByIntent(aiIntent);
+                        // FEATURE 6: Após 3 tentativas falhas, escalar para humano
+                        if (attempts >= 3) {
+                            this.logger.warn(`🚨 3 tentativas falhas - escalando para humano`);
+                            const firstName = user.name ? user.name.split(' ')[0] : '';
+                            response = `${firstName ? firstName + ', ' : ''}tudo bem! �\n\nVou chamar alguém da nossa equipe para te ajudar melhor.\n\n👤 Um atendente vai te responder em breve!\n\n_Enquanto isso, pode continuar mandando mensagens._`;
+                            intent = 'HUMAN_ESCALATION';
+                            newState = 'HUMAN_HANDOFF';
 
-                            // Adicionar transição de estado se a IA detectar agendamento
-                            if (aiIntent === 'SCHEDULE_NEW') {
-                                newState = 'SCHEDULING_FLOW';
-                            }
+                            // FEATURE: Notificar ADMIN quando auto-escalar
+                            const adminPhone = settings.adminPhone;
+                            if (adminPhone) {
+                                const cleanAdminPhone = adminPhone.replace(/\D/g, '');
+                                if (cleanAdminPhone.length >= 10) {
+                                    const adminChatId = `${cleanAdminPhone}@s.whatsapp.net`;
+                                    const clientPhone = msg.from.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                                    const adminNotification = `🚨 *Auto-Escalação (IA falhou 3x)*\n\nCliente: ${user.name || 'Desconhecido'}\nTelefone: ${clientPhone}\nÚltima mensagem: "${msg.body}"\n\n📲 O bot não conseguiu ajudar. Entre em contato.`;
 
-                            // ... Lógica de Smart Filling ...
-                            if (aiIntent === 'SCHEDULE_NEW' && entities && Object.keys(entities).length > 0) {
-                                // FEATURE 5.1: Validar serviço dinâmico
-                                const services = settings.services || [
-                                    { name: 'Terapia Individual', price: 150 },
-                                    { name: 'Avaliação Psicológica', price: 800 }
-                                ];
-
-                                // Tentar encontrar serviço correspondente
-                                const matchedService = entities.service ? services.find((s: any) =>
-                                    entities.service.toLowerCase().includes(s.name.toLowerCase()) ||
-                                    s.name.toLowerCase().includes(entities.service.toLowerCase())
-                                ) : null;
-
-                                if (matchedService) {
-                                    newState = 'SCHEDULING_FLOW';
-                                    await this.context.updateContext(user.id, conversation.id, {
-                                        selectedService: matchedService.name,
-                                        servicePrice: Number(matchedService.price),
-                                        serviceDuration: Number(matchedService.duration) || 60,
-                                        schedulingStep: 'SELECT_DATE'
-                                    });
-                                    ruleResult.response = `📅 Entendi: ${matchedService.name}. Qual dia?`;
+                                    this.logger.log(`📤 Notificando ADMIN sobre auto-escalação: ${adminChatId}`);
+                                    await this.whatsapp.sendMessage(adminChatId, adminNotification);
                                 }
-                                // Se não encontrar serviço válido, não faz auto-fill e deixa cair na pergunta padrão do RuleEngine
                             }
-                            response = ruleResult.response;
+                        } else {
+                            this.logger.warn(`⚠️ Confiança baixa (${confidence}%) - tentativa ${attempts}/3`);
+                            response = this.generateClarificationQuestion(msg.body, user.name);
+                            intent = 'LOW_CONFIDENCE';
                         }
                     }
-                }
-            }
+                    else if (aiIntent && aiIntent !== 'UNKNOWN') {
+                        this.logger.log(`🤖 IA recuperou: ${aiIntent} (${confidence}% confiança)`);
+                        intent = aiIntent;
+
+                        ruleResult.matched = true;
+                        ruleResult.intent = aiIntent;
+                        // PASSANDO SETTINGS E NOME DO USUARIO (Feature 5)
+                        ruleResult.response = this.ruleEngine.getResponseByIntent(aiIntent, settings, user.name);
+                        ruleResult.event = this.ruleEngine.getEventByIntent(aiIntent);
+
+                        // FEATURE: Notificar admin se IA detectou pedido de humano
+                        if (ruleResult.event === 'HANDOFF_REQUESTED') {
+                            await this.notifyAdminHandoff(user, msg, settings);
+                            newState = 'HUMAN_HANDOFF';
+                        }
+
+                        // Adicionar transição de estado se a IA detectar agendamento
+                        if (aiIntent === 'SCHEDULE_NEW') {
+                            newState = 'SCHEDULING_FLOW';
+                        }
+
+                        // FIX: Tratamento explícito para 'Ver Consultas' via IA
+                        if (aiIntent === 'VIEW_APPOINTMENTS') {
+                            const listResponse = await this.handleMyAppointments(user.id);
+                            ruleResult.response = listResponse;
+                        }
+
+                        // ... Lógica de Smart Filling ...
+                        if (aiIntent === 'SCHEDULE_NEW' && entities && Object.keys(entities).length > 0) {
+                            // FEATURE 5.1: Validar serviço dinâmico
+                            const services = settings.services || [
+                                { name: 'Terapia Individual', price: 150 },
+                                { name: 'Avaliação Psicológica', price: 800 }
+                            ];
+
+                            // Tentar encontrar serviço correspondente
+                            const matchedService = entities.service ? services.find((s: any) =>
+                                entities.service.toLowerCase().includes(s.name.toLowerCase()) ||
+                                s.name.toLowerCase().includes(entities.service.toLowerCase())
+                            ) : null;
+
+                            if (matchedService) {
+                                newState = 'SCHEDULING_FLOW';
+                                await this.context.updateContext(user.id, conversation.id, {
+                                    selectedService: matchedService.name,
+                                    servicePrice: Number(matchedService.price),
+                                    serviceDuration: Number(matchedService.duration) || 60,
+                                    schedulingStep: 'SELECT_DATE'
+                                });
+                                ruleResult.response = `📅 Entendi: ${matchedService.name}. Qual dia?`;
+                            }
+                            // Se não encontrar serviço válido, não faz auto-fill e deixa cair na pergunta padrão do RuleEngine
+                        }
+                        response = ruleResult.response;
+                    }
+                }      // Closes inner else
+            }      // Closes outer else (294)
 
             // 4. Executar transição de estado se necessário
             if (response) {
@@ -391,10 +442,12 @@ export class OrchestratorService implements OnModuleInit {
                     checkEmpathy: true
                 });
 
+
                 // FIX: Não enviar mensagem aqui - o WhatsAppService já envia quando recebe o retorno do handler
                 await this.saveMessage(conversation.id, 'OUTBOUND', finalResponse, intent);
                 await this.updateConversationState(conversation.id, newState);
 
+                // this.logger.log(`🔙 Retornando resposta para WhatsApp: "${finalResponse.substring(0, 50)}..."`);
                 return finalResponse;
             }
 
@@ -404,6 +457,7 @@ export class OrchestratorService implements OnModuleInit {
             this.logger.error(`❌ Erro no orquestrador: ${error}`);
             return null;
         }
+        return null;
     }
 
     // --- Métodos Privados de Fluxo ---
@@ -414,21 +468,25 @@ export class OrchestratorService implements OnModuleInit {
         const msgLower = message.toLowerCase().trim();
 
         // FEATURE: Flow Interruption (Escape Hatch & FAQs)
-        if (intent === 'CANCEL_APPOINTMENT' || intent === 'HUMAN_REQUEST') {
+        if (intent === 'CANCEL_APPOINTMENT') {
+            await this.context.clearContext(userId, conversationId);
+            return { response: '👍 Tudo bem! Agendamento cancelado.', completed: true };
+        }
+        if (intent === 'HUMAN_REQUEST') {
             return { response: '', completed: true };
         }
 
         // FEATURE: Permitir cancelar o fluxo de agendamento a qualquer momento (exceto nas confirmações sim/não)
         const step = context.schedulingStep || 'SELECT_SERVICE';
-        const isConfirmationStep = step === 'CONFIRM' || step === 'SELECT_TIME';
+        // const isConfirmationStep = step === 'CONFIRM' || step === 'SELECT_TIME'; // Removing restriction
         const cancelKeywords = ['cancela', 'cancelar', 'sair', 'deixa pra lá', 'deixa pra la', 'esquece', 'não quero mais', 'nao quero mais', 'desisto', 'parar'];
 
-        if (!isConfirmationStep && cancelKeywords.some(k => msgLower.includes(k))) {
+        if (cancelKeywords.some(k => msgLower.includes(k))) {
             // Limpar contexto de agendamento
             await this.context.clearContext(userId, conversationId);
-            this.logger.log(`🚪 Usuário cancelou o fluxo de agendamento`);
+            this.logger.log(`🚪 Usuário cancelou o fluxo de agendamento. Gerando resposta...`);
             return {
-                response: '👍 Tudo bem! Agendamento cancelado. Se precisar de algo, é só chamar!',
+                response: '👍 Entendido! Agendamento cancelado com sucesso. Se precisar, estou aqui!',
                 completed: true
             };
         }
@@ -660,6 +718,25 @@ export class OrchestratorService implements OnModuleInit {
 
                     // Criar agendamento no banco
                     try {
+                        // FIX: Prevenir Double Booking (Race Condition)
+                        const existing = await this.prisma.appointment.findFirst({
+                            where: {
+                                dateTime: finalDate,
+                                status: { not: 'CANCELLED' }
+                            }
+                        });
+
+                        if (existing) {
+                            await this.context.updateContext(userId, conversationId, {
+                                schedulingStep: 'SELECT_TIME', // Voltar um passo
+                                selectedTime: undefined
+                            });
+                            return {
+                                response: '⚠️ Poxa, alguém acabou de reservar esse horário! 😓\n\nPor favor, escolha outro horário.',
+                                completed: false
+                            };
+                        }
+
                         await this.prisma.appointment.create({
                             data: {
                                 userId: userId,
@@ -668,6 +745,21 @@ export class OrchestratorService implements OnModuleInit {
                                 status: 'CONFIRMED'
                             }
                         });
+
+                        // FEATURE: Processar cancelamento de reagendamento se houver
+                        if (current.rescheduleFromAppointmentId) {
+                            try {
+                                await this.prisma.appointment.update({
+                                    where: { id: current.rescheduleFromAppointmentId },
+                                    data: { status: 'CANCELLED', cancelledAt: new Date() }
+                                });
+                                response += `\n\n🔄 Seu agendamento anterior foi cancelado e substituído.`;
+                                // Limpar ID para evitar problemas futuros
+                                await this.context.updateContext(userId, conversationId, { rescheduleFromAppointmentId: undefined });
+                            } catch (e) {
+                                this.logger.error(`Erro ao cancelar agendamento anterior durante remarcação: ${e}`);
+                            }
+                        }
                     } catch (e) {
                         this.logger.error(`Erro ao salvar agendamento: ${e}`);
                         response = '⚠️ Houve um erro interno ao salvar seu agendamento, mas anotei aqui. Um atendente humano irá confirmar com você em breve.';
@@ -710,6 +802,7 @@ export class OrchestratorService implements OnModuleInit {
                 break;
         }
 
+        this.logger.log(`✅ [DEBUG] Exiting handleSchedulingFlow with response: "${response.substring(0, 30)}..."`);
         return { response, completed };
     }
 
@@ -742,7 +835,7 @@ export class OrchestratorService implements OnModuleInit {
             return `• *${apt.service}* - ${dateStr}`;
         }).join('\n');
 
-        return `📋 Seus próximos agendamentos:\n\n${list}\n\nPara cancelar algum, digite *Cancelar consulta*.`;
+        return `📋 Seus próximos agendamentos:\n\n${list}\n\nPara remarcar algum, digite *Remarcar consulta*.`;
     }
 
     // --- FEATURE: Cancelar Agendamento ---
@@ -849,11 +942,8 @@ export class OrchestratorService implements OnModuleInit {
             return { response: '🤔 Não encontrei agendamentos futuros para remarcar.\n\nDigite *Agendar* para marcar uma consulta!', startScheduling: false };
         }
 
-        // Cancelar o atual
-        await this.prisma.appointment.update({
-            where: { id: nextAppointment.id },
-            data: { status: 'CANCELLED', cancelledAt: new Date() }
-        });
+        // FIX: Não cancelar agora! Apenas salvar ID para cancelar DEPOIS de confirmar o novo.
+        // await this.prisma.appointment.update({ ... });
 
         const dateStr = format(nextAppointment.dateTime, "dd/MM 'às' HH:mm", { locale: ptBR });
 
@@ -862,11 +952,12 @@ export class OrchestratorService implements OnModuleInit {
             schedulingStep: 'SELECT_DATE',
             selectedService: nextAppointment.service,
             selectedDay: undefined,
-            selectedTime: undefined
+            selectedTime: undefined,
+            rescheduleFromAppointmentId: nextAppointment.id // Salvar ID para cancelar depois
         });
 
         return {
-            response: `🔄 Cancelei sua consulta de *${nextAppointment.service}* do dia *${dateStr}*.\n\n📅 Vamos remarcar! Para qual novo dia você gostaria?`,
+            response: `🔄 Vamos remarcar sua consulta de *${nextAppointment.service}* (Dia *${dateStr}*).\n\n📅 Para qual **novo dia** você gostaria?`,
             startScheduling: true
         };
     }
@@ -915,7 +1006,7 @@ export class OrchestratorService implements OnModuleInit {
         appointments.forEach((apt, index) => {
             const time = apt.dateTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
             const name = apt.user.name || 'Sem nome';
-            const phone = apt.user.phone.replace('@s.whatsapp.net', '').replace('@c.us', '');
+            const phone = apt.user.phone.replace('@s.whatsapp.net', '').replace('@c.us', '').replace('@lid', '');
 
             response += `${index + 1}. *${time}* - ${name}\n`;
             response += `   📱 ${phone}\n`;
@@ -1039,7 +1130,7 @@ export class OrchestratorService implements OnModuleInit {
         appointments.forEach((apt, index) => {
             const time = apt.dateTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
             const name = apt.user.name || 'Sem nome';
-            const phone = apt.user.phone.replace('@s.whatsapp.net', '').replace('@c.us', '');
+            const phone = apt.user.phone.replace('@s.whatsapp.net', '').replace('@c.us', '').replace('@lid', '');
 
             response += `${index + 1}. *${time}* - ${name}\n`;
             response += `   📱 ${phone}\n`;
@@ -1053,14 +1144,62 @@ export class OrchestratorService implements OnModuleInit {
 
 
     // FEATURE 1: Gerar pergunta de esclarecimento quando confiança é baixa
+    // VERSÃO MELHORADA: Fallback inteligente com CTAs para fluxos do bot
     private generateClarificationQuestion(originalMessage: string, userName?: string | null): string {
-        const greeting = userName ? `${userName}, ` : '';
-        const questions = [
-            `${greeting}não entendi bem. 🤔\n\nVocê deseja:\n📅 *Agendar* consulta\n📍 *Endereço* da clínica\n🕐 *Horários* de funcionamento\n🗣️ *Falar com Atendente*\n\nEscolha uma opção ou digite *Menu*!`,
+        const name = userName ? userName.split(' ')[0] : '';
+        const greeting = name ? `${name}, ` : '';
+
+        // Analisar mensagem para dar dica contextual
+        const msgLower = originalMessage.toLowerCase();
+
+        // Fallbacks contextuais baseados em palavras-chave parciais
+        if (msgLower.includes('hora') || msgLower.includes('quando') || msgLower.includes('abr')) {
+            return `${greeting}você quer saber nosso *horário de funcionamento*? 🕐\n\nOu prefere *agendar* uma consulta?`;
+        }
+
+        if (msgLower.includes('onde') || msgLower.includes('local') || msgLower.includes('end')) {
+            return `${greeting}quer saber o *endereço* da clínica? 📍\n\nDigite *endereço* que te mostro!`;
+        }
+
+        if (msgLower.includes('preç') || msgLower.includes('valor') || msgLower.includes('cust') || msgLower.includes('quant')) {
+            return `${greeting}para informações sobre valores, digite *atendente* que conecto você! 💬`;
+        }
+
+        if (msgLower.includes('marc') || msgLower.includes('consult') || msgLower.includes('sess')) {
+            return `${greeting}quer *agendar* uma consulta? 📅\n\nDigite *agendar* para começar!`;
+        }
+
+        // Fallbacks gerais variados (mais amigáveis)
+        const generalFallbacks = [
+            `${greeting}não entendi bem. 🤔\n\nVocê deseja:\n📅 *Agendar* consulta\n📋 *Listar Serviços*\nℹ️ *Info Consultas*\n🕐 *Horários* de funcionamento\n📍 *Endereço* da clínica\n🗣️ *Falar com Atendente*\n\nEscolha uma opção ou digite *Menu*!`,
             `${greeting}pode me explicar melhor? 😊\n\nPosso ajudar com:\n• Agendamentos\n• Informações\n\nQual você precisa?`,
             `${greeting}desculpe, não ficou claro para mim. 🙏\n\nDigite *Menu* para ver todas as opções ou me diga se quer *agendar* ou *falar com atendente*.`
         ];
-        return questions[Math.floor(Math.random() * questions.length)];
+
+        return generalFallbacks[Math.floor(Math.random() * generalFallbacks.length)];
+    }
+
+    private async notifyAdminHandoff(user: any, msg: IncomingMessage, settings: any, reason: string = 'Novo Atendimento Humano') {
+        let adminPhone = settings.adminPhone;
+        if (adminPhone) {
+            let cleanPhone = adminPhone.replace(/\D/g, '');
+            if (cleanPhone.length >= 10) {
+                const targetId = `${cleanPhone}@s.whatsapp.net`;
+                this.logger.log(`📤 Notificando admin no target: ${targetId}`);
+
+                const clientName = user.name || 'Cliente';
+                const clientPhone = msg.from.replace('@s.whatsapp.net', '').replace('@c.us', '');
+                const adminNotification = `🔔 *${reason}*\n\nCliente: ${clientName}\nTelefone: ${clientPhone}\nMensagem: "${msg.body}"\n\n📲 Entre em contato com o cliente.`;
+
+                const sent = await this.whatsapp.sendMessage(targetId, adminNotification);
+                if (sent) this.logger.log(`✅ Notificação enviada.`);
+                else this.logger.warn(`⚠️ Falha ao notificar admin.`);
+            } else {
+                this.logger.warn(`⚠️ adminPhone inválido: ${cleanPhone}`);
+            }
+        } else {
+            this.logger.warn('⚠️ adminPhone não configurado nas settings');
+        }
     }
 
     // FEATURE 12: Simulador (Sem WhatsApp)

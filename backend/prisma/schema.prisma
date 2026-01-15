@@ -64,6 +64,8 @@ model Appointment {
   duration    Int               @default(60)
   status      AppointmentStatus @default(PENDING)
   notes       String?
+  reminderSent Boolean          @default(false)
+  dayOfReminderSent Boolean     @default(false)
   createdAt   DateTime          @default(now())
   confirmedAt DateTime?
   cancelledAt DateTime?
