@@ -368,4 +368,35 @@ export class RuleEngine {
         const rule = rules.find(r => r.intent === intent);
         return rule?.event;
     }
+
+    /**
+     * FEATURE: Retorna resposta personalizada baseada na categoria da imagem
+     * Respostas curtas e diretas, sem repetir a descrição da imagem
+     */
+    getImageCategoryResponse(category: string, description: string, confidence: number): string {
+        const lowConfidenceWarning = confidence < 60
+            ? '\n\n⚠️ _Não consegui analisar bem. Envie novamente se precisar._'
+            : '';
+
+        // Categorias importantes com resposta curta
+        const responses: Record<string, string> = {
+            'payment_proof': `✅ *Comprovante recebido!*\n\nNossa equipe irá verificar e confirmar em breve. 👍${lowConfidenceWarning}`,
+
+            'medical': `📋 *Documento médico recebido!*\n\nUm atendente irá analisar. 👨‍⚕️${lowConfidenceWarning}`,
+
+            'id_card': `🪪 *Documento recebido!*\n\nUsaremos para atualizar seu cadastro. ✅${lowConfidenceWarning}`,
+
+            'receipt': `🧾 *Recibo recebido!*\n\nDocumento arquivado com sucesso. ✅${lowConfidenceWarning}`,
+
+            'document': `📄 *Documento recebido!*\n\nSe precisar de algo, me avise. ✅${lowConfidenceWarning}`,
+        };
+
+        // Se for categoria importante, retorna resposta curta
+        if (responses[category]) {
+            return responses[category];
+        }
+
+        // Para foto, screenshot, other - resposta genérica
+        return `🖼️ Imagem recebida!\n\nDigite *Menu* para ver as opções.`;
+    }
 }

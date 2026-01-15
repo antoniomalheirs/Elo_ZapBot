@@ -108,6 +108,22 @@ export class OrchestratorService implements OnModuleInit {
             const isAdmin = adminPhone && senderPhone === adminPhone;
             const msgLower = msg.body.toLowerCase().trim();
 
+            // FEATURE: Detectar e responder imagens por categoria
+            const imageMatch = msg.body.match(/^\[Imagem\/(\w+):\s*(.+?)(?:\s*\(confiança:\s*(\d+)%\))?\]$/);
+            if (imageMatch) {
+                const category = imageMatch[1];
+                const description = imageMatch[2];
+                const confidence = parseInt(imageMatch[3] || '80');
+
+                this.logger.log(`🖼️ Imagem detectada: categoria=${category}, confiança=${confidence}%`);
+
+                const imageResponse = this.ruleEngine.getImageCategoryResponse(category, description, confidence);
+                await this.saveMessage(conversation.id, 'OUTBOUND', imageResponse, `IMAGE_${category.toUpperCase()}`);
+                await this.updateConversationState(conversation.id, conversation.state);
+
+                return imageResponse;
+            }
+
             if (isAdmin) {
                 this.logger.log(`👑 Admin detectado: ${msg.body}`);
                 let agendaResponse: string | null = null;

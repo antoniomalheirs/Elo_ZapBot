@@ -1,0 +1,19 @@
+# Railway configuration for ZapBot Backend
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Use a persistent filesystem for WhatsApp session
+startCommand = "sh -c 'npx prisma migrate deploy && npm run start:prod'"
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+# Environment variables hints (set these in Railway dashboard)
+# DATABASE_URL - Provided automatically by Railway Postgres
+# REDIS_URL - Provided automatically by Railway Redis (optional)
+# GEMINI_API_KEY - Your Google Gemini API key
+# SESSION_PATH - /app/.baileys_auth (persistent volume)

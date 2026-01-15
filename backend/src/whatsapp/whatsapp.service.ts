@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
 import { TranscriptionService } from '../ai/transcription.service';
+import { VisionService } from '../ai/vision.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import makeWASocket, {
@@ -47,7 +48,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     constructor(
         private readonly prisma: PrismaService,
-        private readonly transcriptionService: TranscriptionService
+        private readonly transcriptionService: TranscriptionService,
+        private readonly visionService: VisionService
     ) {
         this.sessionPath = path.resolve(process.cwd(), '.baileys_auth');
         this.logger.log(`📁 Configurando Sessão Baileys em: ${this.sessionPath}`);
@@ -277,7 +279,36 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
                     body = '[Erro ao processar áudio]';
                 }
             } else if (messageContent?.imageMessage) {
-                body = messageContent.imageMessage.caption || '[Imagem recebida]';
+                // FEATURE: Análise de imagens com Gemini Vision + Confiança
+                try {
+                    this.logger.log(`🖼️ Imagem recebida de ${phoneNumber}. Analisando...`);
+
+                    // @ts-ignore - Baileys type issue
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                    const mimeType = messageContent.imageMessage.mimetype || 'image/jpeg';
+
+                    // Analisar imagem com Vision AI (retorna { description, confidence, category })
+                    const analysis = await this.visionService.analyzeImage(buffer as Buffer, mimeType);
+
+                    // Combinar legenda (se houver) com a descrição da imagem
+                    const caption = messageContent.imageMessage.caption || '';
+
+                    if (analysis.description && analysis.confidence > 0) {
+                        // Formatar body com informações de confiança para o Orquestrador
+                        const confidenceTag = analysis.confidence >= 80 ? '' : ` (confiança: ${analysis.confidence}%)`;
+                        body = caption
+                            ? `[Imagem/${analysis.category}: ${analysis.description}${confidenceTag}] Legenda: ${caption}`
+                            : `[Imagem/${analysis.category}: ${analysis.description}${confidenceTag}]`;
+
+                        this.logger.log(`✅ Imagem analisada: "${analysis.description.substring(0, 50)}..." (${analysis.confidence}%, ${analysis.category})`);
+                    } else {
+                        // Fallback: usar só a legenda
+                        body = caption || '[Imagem recebida - não foi possível analisar]';
+                    }
+                } catch (err) {
+                    this.logger.error(`❌ Erro ao processar imagem: ${err}`);
+                    body = messageContent.imageMessage.caption || '[Erro ao processar imagem]';
+                }
             } else if (messageContent?.videoMessage) {
                 body = messageContent.videoMessage.caption || '[Vídeo recebido]';
             } else if (messageContent?.documentMessage) {

@@ -176,7 +176,10 @@ export class SchedulerService {
                         try {
                             await this.prisma.appointment.update({
                                 where: { id: apt.id },
-                                data: { dayOfReminderSent: true }
+                                data: {
+                                    dayOfReminderSent: true,
+                                    reminderSent: true
+                                }
                             });
                             this.logger.log(`✅ Confirmação do dia enviada e salva para ${apt.user.name}`);
                         } catch (e) {
@@ -285,7 +288,7 @@ export class SchedulerService {
             // Buscar conversas em SCHEDULING_FLOW ou CONFIRMATION_PENDING sem atividade
             const staleConversations = await this.prisma.conversation.findMany({
                 where: {
-                    state: { in: ['SCHEDULING_FLOW', 'CONFIRMATION_PENDING'] },
+                    state: { in: ['INIT', 'FAQ_FLOW', 'SCHEDULING_FLOW', 'CONFIRMATION_PENDING'] },
                     updatedAt: { lt: oneHourAgo }
                 }
             });

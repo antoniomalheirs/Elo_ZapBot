@@ -83,6 +83,7 @@ export class KeywordDetectorService {
         // VER AGENDAMENTOS - Consultar seus agendamentos
         // ═══════════════════════════════════════════════════════════════
         ['VIEW_APPOINTMENTS', [
+            // Padrões originais
             /\b(minhas?\s*consultas?|meus?\s*agendamentos?)\b/i,
             /\b(quando\s*(é|e|seria)\s*minha\s*consulta)\b/i,
             /\b(ver|consultar|checar|visualizar)\s*(minha|meus|as|os)?\s*(consultas?|agendamentos?)\b/i,
@@ -90,6 +91,19 @@ export class KeywordDetectorService {
             /\b(tenho\s*consulta|tenho\s*agendamento|tenho\s*marcado)\b/i,
             /\b(qual\s*(é|e)\s*minha?\s*(próxima?|proxima?)\s*consulta)\b/i,
             /\b(ja\s*tenho|já\s*tenho)\s*(consulta|agendamento|algo\s*marcado)\b/i,
+
+            // NOVOS: Padrões conversacionais para áudios transcritos
+            /\b(queria|quero|gostaria)\s*(de\s*)?(saber|ver|conferir)\s*.{0,15}(minhas?|meus?|próximas?|proximas?)\s*(consultas?|agendamentos?)\b/i,
+            /\b(quais\s*(são|sao)\s*(as|os)?\s*(minhas?|meus?)\s*(próximas?|proximas?)?\s*(consultas?|agendamentos?))\b/i,
+            /\b(me\s*(mostra|fala|diz)\s*.{0,10}(minhas?|meus?)\s*(consultas?|agendamentos?))\b/i,
+            /\b(tem\s*(alguma|algo)\s*marcado\s*(pra|para)\s*mim)\b/i,
+            /\b(quais\s*são\s*os\s*meus\s*próximos\s*(compromissos|horários|agendamentos))\b/i,
+            /\b(próximas?\s*consultas?|proximas?\s*consultas?)\b/i,
+            /\b(o\s*que\s*(eu\s*)?(tenho|tem)\s*marcado)\b/i,
+            /\b(meus\s*horários|minhas\s*marcações)\b/i,
+            /\b(agenda\s*(do|da)\s*(dia|semana)|minha\s*agenda)\b/i,
+            /\b(info\s*(de\s*)?(consultas?|agendamentos?))\b/i,
+            /\b(informações?\s*(sobre|das?|dos?)\s*(minhas?|meus?)\s*(consultas?|agendamentos?))\b/i,
         ]],
 
         // ═══════════════════════════════════════════════════════════════

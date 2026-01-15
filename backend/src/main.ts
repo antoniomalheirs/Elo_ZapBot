@@ -19,9 +19,10 @@ async function bootstrap() {
         }),
     );
 
-    // CORS for admin panel - Allow any localhost port for development
+    // CORS - Dynamic for dev/production
+    const isProduction = process.env.NODE_ENV === 'production';
     app.enableCors({
-        origin: [/http:\/\/localhost:[0-9]+/],
+        origin: isProduction ? true : [/http:\/\/localhost:[0-9]+/],
         credentials: true,
     });
 

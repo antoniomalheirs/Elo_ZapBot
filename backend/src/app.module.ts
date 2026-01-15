@@ -11,6 +11,7 @@ import { AIModule } from './ai/ai.module';
 import { ContextModule } from './context/context.module';
 import { SchedulingModule } from './scheduling/scheduling.module';
 import { SystemConfigModule } from './config/config.module';
+import { HealthModule } from './health/health.module';
 
 @Module({
     imports: [
@@ -30,6 +31,7 @@ import { SystemConfigModule } from './config/config.module';
         ContextModule,
         SchedulingModule,
         SystemConfigModule,
+        HealthModule,
     ],
 })
 export class AppModule { }
