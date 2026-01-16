@@ -22,7 +22,6 @@ COPY backend/ .
 
 # Build the application
 RUN npm run build
-RUN ls -la /app/dist
 
 # Production stage
 FROM node:20-alpine AS runner
@@ -43,7 +42,6 @@ RUN npx prisma generate
 
 # Copy built application from builder
 COPY --from=builder /app/dist ./dist
-RUN ls -la /app/dist
 
 # Create directory for WhatsApp session (will be persisted via Railway volume)
 RUN mkdir -p /app/.baileys_auth
