@@ -63,15 +63,29 @@ export class ContextService {
 
     private async initializeRedis() {
         try {
-            const redisHost = this.config.get<string>('REDIS_HOST') || 'localhost';
-            const redisPort = this.config.get<number>('REDIS_PORT') || 6379;
+            const redisUrl = this.config.get<string>('REDIS_URL') ||
+                this.config.get<string>('REDIS_PUBLIC_URL'); // Railway Public URL
 
-            this.redis = new Redis({
-                host: redisHost,
-                port: redisPort,
-                maxRetriesPerRequest: 3,
-                lazyConnect: true,
-            });
+            if (redisUrl) {
+                this.logger.log(`🔗 Conectando Redis via URL...`);
+                this.redis = new Redis(redisUrl, {
+                    maxRetriesPerRequest: 3,
+                    lazyConnect: true,
+                });
+            } else {
+                const redisHost = this.config.get<string>('REDIS_HOST') || 'localhost';
+                const redisPort = this.config.get<number>('REDIS_PORT') || 6379;
+                const redisPassword = this.config.get<string>('REDIS_PASSWORD');
+
+                this.logger.log(`🔗 Conectando Redis via Host:Port (${redisHost}:${redisPort})...`);
+                this.redis = new Redis({
+                    host: redisHost,
+                    port: redisPort,
+                    password: redisPassword, // Add password support
+                    maxRetriesPerRequest: 3,
+                    lazyConnect: true,
+                });
+            }
 
             await this.redis.connect();
             this.useRedis = true;
