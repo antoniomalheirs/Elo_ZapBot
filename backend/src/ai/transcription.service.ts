@@ -1,147 +1,78 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { pipeline } from '@xenova/transformers';
+import { ConfigService } from '@nestjs/config';
+import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import * as fs from 'fs';
-import * as path from 'path';
-import * as ffmpeg from 'fluent-ffmpeg';
-import { WaveFile } from 'wavefile';
 
 @Injectable()
 export class TranscriptionService {
     private readonly logger = new Logger(TranscriptionService.name);
-    private transcriber: any = null;
-    private readonly modelName = 'Xenova/whisper-small'; // UPGRADED: Modelo mais preciso
+    private genAI: GoogleGenerativeAI;
+    private model: GenerativeModel;
 
-    constructor() {
-        this.initializeModel();
-    }
-
-    /**
-     * Inicializa o modelo Whisper (carregamento lazy)
-     */
-    private async initializeModel() {
-        try {
-            this.logger.log(`📥 Carregando modelo Whisper (${this.modelName})...`);
-            this.logger.log(`⚠️ Isso pode demorar alguns minutos na primeira vez (download ~500MB)...`);
-            // @ts-ignore
-            this.transcriber = await pipeline('automatic-speech-recognition', this.modelName);
-            this.logger.log('✅ Modelo Whisper carregado com sucesso!');
-        } catch (error) {
-            this.logger.error(`❌ Erro ao carregar Whisper: ${error}`);
+    constructor(private readonly config: ConfigService) {
+        const apiKey = this.config.get<string>('GEMINI_API_KEY');
+        if (apiKey) {
+            this.genAI = new GoogleGenerativeAI(apiKey);
+            this.model = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+        } else {
+            this.logger.error('❌ GEMINI_API_KEY hianyet! Transcrição não funcionará.');
         }
     }
 
     /**
-     * Transcreve um arquivo de áudio (OGG/MP3/WAV) para texto
+     * Transcreve um arquivo de áudio usando Google Gemini
      */
     async transcribe(audioPath: string): Promise<string> {
-        if (!this.transcriber) {
-            await this.initializeModel();
+        if (!this.model) {
+            this.logger.error('❌ Modelo Gemini não inicializado. Verifique a API Key.');
+            return '';
         }
 
         try {
-            // Converter para WAV com redução de ruído
-            const wavPath = await this.convertToWavWithNoiseReduction(audioPath);
+            this.logger.log(`🎙️ Enviando áudio para Gemini: ${audioPath}`);
 
-            this.logger.log(`🎙️ Transcrevendo áudio: ${wavPath}`);
-
-            // NODE.JS FIX: Ler WAV como Float32Array (AudioContext não existe no Node)
-            const audioData = this.readWavAsFloat32(wavPath);
-
-            const result = await this.transcriber(audioData, {
-                language: 'portuguese',
-                task: 'transcribe',
-                sampling_rate: 16000,
-                // Prompt de contexto para melhorar transcrição de vocabulário específico
-                initial_prompt: 'Clínica de psicologia. Palavras-chave: consulta, agendamento, terapia, avaliação, remarcar, cancelar, horário, psicóloga, atendimento.'
-            });
-
-            // Limpar arquivo temporário WAV se criado
-            if (wavPath !== audioPath && fs.existsSync(wavPath)) {
-                fs.unlinkSync(wavPath);
+            // Ler arquivo
+            if (!fs.existsSync(audioPath)) {
+                this.logger.error(`❌ Arquivo de áudio não encontrado: ${audioPath}`);
+                return '';
             }
-            // Limpar original também
-            if (fs.existsSync(audioPath)) {
+
+            const audioBuffer = fs.readFileSync(audioPath);
+            const base64Audio = audioBuffer.toString('base64');
+
+            // Tentar determinar mime type simples (WhatsApp geralmente é ogg ou m4a)
+            // Gemini aceita audio/ogg, audio/mp3, audio/wav, audio/aiff, audio/aac, audio/flac
+            let mimeType = 'audio/ogg';
+            if (audioPath.endsWith('.mp3')) mimeType = 'audio/mp3';
+            if (audioPath.endsWith('.wav')) mimeType = 'audio/wav';
+            if (audioPath.endsWith('.m4a')) mimeType = 'audio/m4a';
+            if (audioPath.endsWith('.aac')) mimeType = 'audio/aac';
+
+            const result = await this.model.generateContent([
+                {
+                    inlineData: {
+                        mimeType: mimeType,
+                        data: base64Audio
+                    }
+                },
+                { text: "Transcreva este áudio exatamente como falado. Se não houver fala, responda com string vazia." }
+            ]);
+
+            const text = result.response.text();
+            this.logger.log(`📝 Transcrição Gemini: "${text}"`);
+
+            // Limpar arquivo original para economizar espaço
+            try {
                 fs.unlinkSync(audioPath);
+            } catch (e) {
+                this.logger.warn(`⚠️ Erro ao deletar arquivo temporário: ${e}`);
             }
 
-            const text = result.text?.trim() || '';
-            this.logger.log(`📝 Transcrição: "${text}"`);
-            return text;
+            return text.trim();
 
         } catch (error) {
-            this.logger.error(`❌ Erro na transcrição: ${error}`);
+            this.logger.error(`❌ Erro na transcrição Gemini: ${error}`);
             return '';
         }
-    }
-
-    /**
-     * Lê arquivo WAV e retorna Float32Array com samples normalizados
-     */
-    private readWavAsFloat32(wavPath: string): Float32Array {
-        const buffer = fs.readFileSync(wavPath);
-        const wav = new WaveFile(buffer);
-
-        // Converter para 32-bit float se necessário
-        wav.toBitDepth('32f');
-
-        // Extrair samples e converter para Float32Array
-        const samples = wav.getSamples(false, Float32Array);
-        // getSamples pode retornar Float64Array, então convertemos explicitamente
-        return new Float32Array(samples as unknown as ArrayLike<number>);
-    }
-
-    /**
-     * Converte arquivo audio para WAV 16kHz COM processamento avançado
-     * Filtros: Redução de ruído, remoção de silêncio, normalização de volume
-     */
-    private convertToWavWithNoiseReduction(inputPath: string): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const outputPath = inputPath.replace(path.extname(inputPath), '_clean.wav');
-
-            this.logger.log(`🔇 Processando áudio: ${inputPath}`);
-
-            // Filtros FFmpeg encadeados:
-            // 1. silenceremove: Remove silêncio no início/fim
-            // 2. afftdn: Redução de ruído adaptativa
-            // 3. dynaudnorm: Normalização dinâmica de volume
-            const audioFilters = [
-                'silenceremove=start_periods=1:start_silence=0.5:start_threshold=-50dB:stop_periods=1:stop_silence=0.5:stop_threshold=-50dB',
-                'afftdn=nf=-25',
-                'dynaudnorm=p=0.9:m=10'
-            ].join(',');
-
-            ffmpeg(inputPath)
-                .audioFilters(audioFilters)
-                .toFormat('wav')
-                .audioFrequency(16000)
-                .audioChannels(1) // Mono para melhor transcrição
-                .on('end', () => {
-                    this.logger.log(`✅ Áudio processado: ${outputPath}`);
-                    resolve(outputPath);
-                })
-                .on('error', (err) => {
-                    this.logger.warn(`⚠️ Falha no processamento, usando simples: ${err.message}`);
-                    // Fallback: converter sem filtros avançados
-                    this.convertToWavSimple(inputPath).then(resolve).catch(reject);
-                })
-                .save(outputPath);
-        });
-    }
-
-    /**
-     * Fallback: Converte sem redução de ruído
-     */
-    private convertToWavSimple(inputPath: string): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const outputPath = inputPath.replace(path.extname(inputPath), '.wav');
-
-            ffmpeg(inputPath)
-                .toFormat('wav')
-                .audioFrequency(16000)
-                .audioChannels(1)
-                .on('end', () => resolve(outputPath))
-                .on('error', (err) => reject(err))
-                .save(outputPath);
-        });
     }
 }
