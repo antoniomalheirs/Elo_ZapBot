@@ -25,6 +25,7 @@ export default function AppointmentsPage() {
     const [showModal, setShowModal] = useState(false);
     const [services, setServices] = useState<Service[]>([]);
     const [formLoading, setFormLoading] = useState(false);
+    const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
     const [formData, setFormData] = useState({
         clientName: '',
         clientPhone: '',
@@ -115,6 +116,28 @@ export default function AppointmentsPage() {
                 </button>
             </header>
 
+            {/* Abas */}
+            <div className="flex gap-4 mb-6 border-b border-slate-800">
+                <button
+                    onClick={() => setActiveTab('active')}
+                    className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'active'
+                        ? 'border-indigo-500 text-indigo-400'
+                        : 'border-transparent text-slate-400 hover:text-slate-200'
+                        }`}
+                >
+                    Próximos
+                </button>
+                <button
+                    onClick={() => setActiveTab('history')}
+                    className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'history'
+                        ? 'border-indigo-500 text-indigo-400'
+                        : 'border-transparent text-slate-400 hover:text-slate-200'
+                        }`}
+                >
+                    Histórico
+                </button>
+            </div>
+
             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
                 <table className="w-full text-left border-collapse">
                     <thead>
@@ -133,37 +156,53 @@ export default function AppointmentsPage() {
                                     <Loader2 className="w-6 h-6 animate-spin mx-auto" />
                                 </td>
                             </tr>
-                        ) : appointments.length === 0 ? (
-                            <tr>
-                                <td colSpan={5} className="p-8 text-center text-slate-500">
-                                    Nenhum agendamento encontrado.
-                                </td>
-                            </tr>
                         ) : (
-                            appointments.map((apt) => (
-                                <tr key={apt.id} className="group hover:bg-slate-800/50 transition-colors">
-                                    <td className="p-4">
-                                        <div className="font-medium text-slate-200">{apt.user.name || 'Sem nome'}</div>
-                                        <div className="text-sm text-slate-500">{apt.user.phone}</div>
-                                    </td>
-                                    <td className="p-4 text-slate-300">
-                                        <span className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs">
-                                            {apt.service}
-                                        </span>
-                                    </td>
-                                    <td className="p-4 text-slate-300 font-mono text-sm">
-                                        {new Date(apt.dateTime).toLocaleDateString('pt-BR')} às {new Date(apt.dateTime).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-                                    </td>
-                                    <td className="p-4">
-                                        <StatusBadge status={apt.status} />
-                                    </td>
-                                    <td className="p-4 text-right">
-                                        <button className="text-indigo-400 hover:text-indigo-300 font-medium text-sm">
-                                            Detalhes
-                                        </button>
+                            appointments.filter(apt => {
+                                const isPast = new Date(apt.dateTime) < new Date();
+                                if (activeTab === 'active') {
+                                    return apt.status === 'PENDING' || (apt.status === 'CONFIRMED' && !isPast);
+                                }
+                                return ['COMPLETED', 'CANCELLED'].includes(apt.status) || (apt.status === 'CONFIRMED' && isPast);
+                            }).length === 0 ? (
+                                <tr>
+                                    <td colSpan={5} className="p-8 text-center text-slate-500">
+                                        {activeTab === 'active'
+                                            ? 'Nenhum agendamento futuro.'
+                                            : 'Nenhum histórico encontrado.'}
                                     </td>
                                 </tr>
-                            ))
+                            ) : (
+                                appointments.filter(apt => {
+                                    const isPast = new Date(apt.dateTime) < new Date();
+                                    if (activeTab === 'active') {
+                                        return apt.status === 'PENDING' || (apt.status === 'CONFIRMED' && !isPast);
+                                    }
+                                    return ['COMPLETED', 'CANCELLED'].includes(apt.status) || (apt.status === 'CONFIRMED' && isPast);
+                                }).map((apt) => (
+                                    <tr key={apt.id} className="group hover:bg-slate-800/50 transition-colors">
+                                        <td className="p-4">
+                                            <div className="font-medium text-slate-200">{apt.user.name || 'Sem nome'}</div>
+                                            <div className="text-sm text-slate-500">{apt.user.phone}</div>
+                                        </td>
+                                        <td className="p-4 text-slate-300">
+                                            <span className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs">
+                                                {apt.service}
+                                            </span>
+                                        </td>
+                                        <td className="p-4 text-slate-300 font-mono text-sm">
+                                            {new Date(apt.dateTime).toLocaleDateString('pt-BR')} às {new Date(apt.dateTime).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                                        </td>
+                                        <td className="p-4">
+                                            <StatusBadge status={apt.status} />
+                                        </td>
+                                        <td className="p-4 text-right">
+                                            <button className="text-indigo-400 hover:text-indigo-300 font-medium text-sm">
+                                                Detalhes
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))
+                            )
                         )}
                     </tbody>
                 </table>
@@ -298,6 +337,13 @@ function StatusBadge({ status }: { status: string }) {
         return (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
                 <XCircle className="w-3 h-3" /> Cancelado
+            </span>
+        );
+    }
+    if (s === 'COMPLETED') {
+        return (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                <CheckCircle className="w-3 h-3" /> Realizada
             </span>
         );
     }

@@ -165,7 +165,7 @@ export class SchedulerService {
                     const city = settings.clinicCity || '';
                     const addressFull = address ? `\n📍 ${address}${city ? ` - ${city}` : ''}` : '';
 
-                    const confirmMsg = `⏰ *Lembrete de Consulta!*\n\nOlá ${apt.user.name || 'paciente'}! 👋\n\nSua consulta é *HOJE*:\n\n📅 ${dateStr}\n🕐 ${timeStr}\n\n🏥 *Clínica Elo*${addressFull}\n\nObrigada, Ana Paula Malheiros! 😊`;
+                    const confirmMsg = `⏰ *Lembrete de Consulta!*\n\nOlá ${apt.user.name || 'paciente'},sou a secretária virtual!👋\n\nSua consulta é *HOJE*:\n\n📅 ${dateStr}\n🕐 ${timeStr}\n\n🏥 *Clínica Elo*${addressFull}\n\nObrigada, Ana Paula Malheiros! 😊`;
 
                     const cleanPhone = apt.user.phone.replace(/\D/g, '');
                     const chatId = cleanPhone + '@s.whatsapp.net';
@@ -304,6 +304,80 @@ export class SchedulerService {
 
         } catch (error) {
             this.logger.error(`❌ Erro no cleanup de conversas: ${error}`);
+        }
+    }
+
+    /**
+     * Limpa atendimentos humanos travados/esquecidos
+     * Reset após 24 HORAS de inatividade
+     * Roda a cada hora
+     */
+    @Cron('0 * * * *') // A cada hora
+    async cleanupStaleHandoffs() {
+        this.logger.log('👨‍💼 Verificando atendimentos humanos abandonados...');
+
+        try {
+            const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+            const staleHandoffs = await this.prisma.conversation.findMany({
+                where: {
+                    state: 'HUMAN_HANDOFF',
+                    updatedAt: { lt: twentyFourHoursAgo }
+                }
+            });
+
+            if (staleHandoffs.length > 0) {
+                await this.prisma.conversation.updateMany({
+                    where: { id: { in: staleHandoffs.map(c => c.id) } },
+                    data: { state: 'AUTO_ATTENDANCE' }
+                });
+
+                this.logger.log(`👨‍💼 ${staleHandoffs.length} atendimento(s) humano(s) expirado(s) -> AUTO_ATTENDANCE`);
+            }
+
+        } catch (error) {
+            this.logger.error(`❌ Erro no cleanup de handoffs: ${error}`);
+        }
+    }
+
+    /**
+     * Marca agendamentos passados como COMPLETED
+     * Roda a cada hora para manter o histórico organizado
+     */
+    @Cron('0 * * * *') // A cada hora (XX:00)
+    async markAppointmentsAsCompleted() {
+        this.logger.log('🏁 Verificando agendamentos para conclusão automática...');
+
+        try {
+            const now = new Date();
+
+            // Buscar agendamentos CONFIRMED com data/hora PASSADA
+            const pastAppointments = await this.prisma.appointment.findMany({
+                where: {
+                    status: 'CONFIRMED',
+                    dateTime: { lt: now }
+                }
+            });
+
+            if (pastAppointments.length === 0) {
+                // this.logger.log('🏁 Nenhum agendamento pendente de conclusão.');
+                return;
+            }
+
+            // Atualizar status para COMPLETED
+            const result = await this.prisma.appointment.updateMany({
+                where: {
+                    id: { in: pastAppointments.map(a => a.id) }
+                },
+                data: {
+                    status: 'COMPLETED'
+                }
+            });
+
+            this.logger.log(`🏁 ${result.count} agendamento(s) marcado(s) como COMPLETED.`);
+
+        } catch (error) {
+            this.logger.error(`❌ Erro no Cron de Conclusão Automática: ${error}`);
         }
     }
 

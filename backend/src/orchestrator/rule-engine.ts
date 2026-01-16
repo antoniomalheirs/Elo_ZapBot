@@ -380,7 +380,7 @@ export class RuleEngine {
 
         // Categorias importantes com resposta curta
         const responses: Record<string, string> = {
-            'payment_proof': `✅ *Comprovante recebido!*\n\nNossa equipe irá verificar e confirmar em breve. 👍${lowConfidenceWarning}`,
+            'payment_proof': `✅ *Comprovante recebido!*\n\nObrigada!. 👍${lowConfidenceWarning}`,
 
             'medical': `📋 *Documento médico recebido!*\n\nUm atendente irá analisar. 👨‍⚕️${lowConfidenceWarning}`,
 

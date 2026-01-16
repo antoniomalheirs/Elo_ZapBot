@@ -127,8 +127,13 @@ export default function CalendarPage() {
                                             <CalendarIcon className="w-4 h-4" />
                                             {format(parseISO(apt.dateTime), "d 'de' MMMM, yyyy", { locale: ptBR })}
                                         </div>
-                                        <span className="px-2 py-0.5 rounded bg-slate-800 text-xs text-slate-300 border border-slate-700 uppercase">
-                                            {apt.status}
+                                        <span className={`px-2 py-0.5 rounded text-xs border uppercase
+                                            ${apt.status === 'CONFIRMED' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
+                                                apt.status === 'PENDING' ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                                                    apt.status === 'COMPLETED' ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' :
+                                                        'bg-slate-800 text-slate-300 border-slate-700'
+                                            }`}>
+                                            {apt.status === 'COMPLETED' ? 'REALIZADA' : apt.status}
                                         </span>
                                     </div>
                                     <h3 className="text-lg font-bold text-slate-100">{apt.user.name || 'Sem nome'}</h3>
@@ -210,7 +215,13 @@ export default function CalendarPage() {
 
                                         <div className="flex flex-col gap-1 mt-2 overflow-hidden">
                                             {dayAppointments.slice(0, 3).map(apt => (
-                                                <div key={apt.id} className="h-1.5 rounded-full bg-emerald-500/50 w-full"></div>
+                                                <div key={apt.id} className={`h-1.5 rounded-full w-full
+                                                    ${apt.status === 'CONFIRMED' ? 'bg-emerald-500/50' :
+                                                        apt.status === 'PENDING' ? 'bg-amber-500/50' :
+                                                            apt.status === 'COMPLETED' ? 'bg-blue-500/50' :
+                                                                'bg-slate-700'
+                                                    }
+                                                `}></div>
                                             ))}
                                         </div>
                                     </div>
@@ -241,7 +252,14 @@ export default function CalendarPage() {
                                             <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
                                                 {format(parseISO(apt.dateTime), 'HH:mm')}
                                             </span>
-                                            <span className="text-xs text-slate-500 uppercase">{apt.status}</span>
+                                            <span className={`text-xs uppercase px-1.5 py-0.5 rounded border
+                                                ${apt.status === 'CONFIRMED' ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' :
+                                                    apt.status === 'PENDING' ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' :
+                                                        apt.status === 'COMPLETED' ? 'text-blue-400 bg-blue-500/10 border-blue-500/20' :
+                                                            'text-slate-500 border-transparent'
+                                                }`}>
+                                                {apt.status === 'COMPLETED' ? 'REALIZADA' : apt.status}
+                                            </span>
                                         </div>
                                         <h4 className="font-medium text-slate-200 mb-1">{apt.user.name || 'Sem nome'}</h4>
                                         <div className="flex items-center gap-2 text-xs text-slate-500 mt-2">
