@@ -28,8 +28,8 @@ FROM node:20-alpine AS runner
 
 WORKDIR /app
 
-# Install production dependencies (ffmpeg for audio processing)
-RUN apk add --no-cache ffmpeg
+# Install production dependencies (ffmpeg for audio, gcompat for ONNX/Whisper)
+RUN apk add --no-cache ffmpeg gcompat
 
 # Copy package files and install production deps only
 COPY backend/package*.json ./
